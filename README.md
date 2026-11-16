@@ -1,9 +1,8 @@
 # Full Block Embed
 
-[![Latest release](https://img.shields.io/github/v/release/troncali/full-block-embed?sort=semver)](https://github.com/troncali/full-block-embed/releases/latest)
-[![Downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fobsidianmd%2Fobsidian-releases%2Frefs%2Fheads%2Fmaster%2Fcommunity-plugin-stats.json&query=%24%5B%22full-block-embed%22%5D.downloads&logo=obsidian&label=downloads&color=483699)](https://obsidian.md/plugins?id=full-block-embed)
-[![Lint & Tests](https://github.com/troncali/full-block-embed/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/troncali/full-block-embed/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/troncali/full-block-embed)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/garbsclassic/full-block-embed?sort=semver)](https://github.com/garbsclassic/full-block-embed/releases/latest)
+[![Lint & Tests](https://github.com/garbsclassic/full-block-embed/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/garbsclassic/full-block-embed/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/garbsclassic/full-block-embed)](LICENSE)
 
 Embed the full Markdown of a source block in other Obsidian notes and keep every copy synchronized. Each reference contains ordinary Markdown so notes remain complete and readable in other editors, renderers, scripts, and LLM workflows.
 
@@ -36,22 +35,16 @@ This is useful when a note is used outside of Obsidian, like with an LLM: a long
 
 ## Install
 
-1. **From Community plugins**
-    - Open `Settings → Community plugins` and click `Browse`
-    - Search for `Full Block Embed`
-    - Click `Install` and `Enable`
+- Clone this repository:
 
-2. **From source**
-    - Clone this repository:
+    ```sh
+    git clone https://github.com/garbsclassic/full-block-embed.git
+    ```
 
-        ```sh
-        git clone https://github.com/troncali/full-block-embed.git
-        ```
-
-    - Run `npm install` and `npm run build`
-    - Copy the generated `main.js`, `manifest.json` and `styles.css` into `<vault-path>/.obsidian/plugins/full-block-embed/`
-    - Open `Settings → Community plugins`
-    - Click the refresh button, then enable Full Block Embed
+- Run `npm install` and `npm run build`
+- Copy the generated `main.js`, `manifest.json` and `styles.css` into `<vault-path>/.obsidian/plugins/full-block-embed/`
+- Open `Settings → Community plugins`
+- Click the refresh button, then enable Full Block Embed
 
 <sup>[Back to Top](#full-block-embed)</sup>
 
@@ -230,6 +223,6 @@ npm run version # increment the plugin version
 
 ### License & Provenance
 
-Full Block Embed is © 2026 Matt Troncali and released under the MIT License. It incorporates ideas and adapted implementation work from [Sync Embeds](https://github.com/uthvah/sync-embeds) and [Shared Blocks](https://github.com/perezamadorluisenrique-gif/shared-blocks), both MIT-licensed. Their copyright notices are preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+This is garbsclassic's fork of [Full Block Embed](https://github.com/troncali/full-block-embed), © 2026 Matt Troncali and released under the MIT License. It incorporates ideas and adapted implementation work from [Sync Embeds](https://github.com/uthvah/sync-embeds) and [Shared Blocks](https://github.com/perezamadorluisenrique-gif/shared-blocks), both MIT-licensed. Their copyright notices are preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 <sup>[Back to Top](#full-block-embed)</sup>
