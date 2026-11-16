@@ -30,7 +30,7 @@ One commit per upgrade, ordered so each stands alone and passes the full gate. I
 ## Work
 
 - [x] In-range updates; pin `@codemirror/view` and `@codemirror/state` to Obsidian's peers. Every in-range package was already current.
-- [ ] Node 26 floor: `@types/node ^26`, CI `26.x`, release workflow Node 26, `AGENTS.md`.
+- [x] Node 26 floor: `@types/node ^26`, CI `26.x`, release workflow Node 26, `AGENTS.md`.
 - [ ] esbuild 0.28: read the 0.26–0.28 breaking changes and adjust `esbuild.config.mjs`.
 - [ ] TypeScript 6.0: fix changed compiler defaults and new errors.
 - [ ] ESLint 10 and `eslint-plugin-obsidianmd` 0.6: fix new lint errors; drop `@eslint/js`.
