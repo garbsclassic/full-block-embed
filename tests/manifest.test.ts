@@ -22,6 +22,25 @@ test('Obsidian and npm release metadata stay aligned', async () => {
 	assert.equal(manifest.fundingUrl, undefined);
 });
 
+// Older releases already use the APIs that set minAppVersion, so none may advertise a lower floor.
+test('no release advertises an Obsidian floor below minAppVersion', async () => {
+	const [manifest, versions] = await Promise.all([
+		json('manifest.json'),
+		json('versions.json'),
+	]);
+	const parts = (version: unknown) => String(version).split('.').map(Number);
+	const floor = parts(manifest.minAppVersion);
+
+	for (const [release, appVersion] of Object.entries(versions)) {
+		const app = parts(appVersion);
+		const index = app.findIndex((part, i) => part !== floor[i]);
+		assert.ok(
+			index === -1 || app[index]! > floor[index]!,
+			`${release} requires Obsidian ${String(appVersion)}, below ${String(manifest.minAppVersion)}`,
+		);
+	}
+});
+
 test('license preserves current and upstream attribution', async () => {
 	const [license, notices] = await Promise.all([
 		readFile('LICENSE', 'utf8'),
