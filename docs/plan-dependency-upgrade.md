@@ -31,7 +31,7 @@ One commit per upgrade, ordered so each stands alone and passes the full gate. I
 
 - [x] In-range updates; pin `@codemirror/view` and `@codemirror/state` to Obsidian's peers. Every in-range package was already current.
 - [x] Node 26 floor: `@types/node ^26`, CI `26.x`, release workflow Node 26, `AGENTS.md`.
-- [ ] esbuild 0.28: read the 0.26–0.28 breaking changes and adjust `esbuild.config.mjs`.
+- [x] esbuild 0.28: read the 0.26–0.28 breaking changes and adjust `esbuild.config.mjs`. None touched the config: they cover trusted publishing, Go compiler upgrades, `Uint8Array.fromBase64` for the binary loader, and install-time integrity checks. The bundle shrank 30 bytes because the minifier now emits `()=>{f()}` instead of `()=>void f()`, which is equivalent.
 - [ ] TypeScript 6.0: fix changed compiler defaults and new errors.
 - [ ] ESLint 10 and `eslint-plugin-obsidianmd` 0.6: fix new lint errors; drop `@eslint/js`.
 - [ ] Bundle smoke check: compare `main.js` exports and size against the pre-upgrade build.
