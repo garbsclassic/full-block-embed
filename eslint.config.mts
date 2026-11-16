@@ -13,6 +13,7 @@ export default defineConfig(
 		'package.json',
 		'package-lock.json',
 		'tsconfig.json',
+		'tsconfig.node.json',
 		'tag.mjs',
 	]),
 	{
@@ -22,6 +23,8 @@ export default defineConfig(
 			},
 			parserOptions: {
 				projectService: {
+					// TypeScript 6 no longer loads @types/node by default, which these files need.
+					defaultProject: 'tsconfig.node.json',
 					allowDefaultProject: [
 						'eslint.config.mts',
 						'manifest.json',
