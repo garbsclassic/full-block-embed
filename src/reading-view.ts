@@ -118,7 +118,7 @@ export class ReadingViewRenderer {
 			ctx.addChild(
 				new RenderedNoteObserver(el, this.actions, file.path, text),
 			);
-		const walker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT);
+		const walker = el.doc.createTreeWalker(el, NodeFilter.SHOW_COMMENT);
 		const comments: Comment[] = [];
 		while (walker.nextNode()) comments.push(walker.currentNode as Comment);
 		const pairs: Array<{
@@ -143,7 +143,7 @@ export class ReadingViewRenderer {
 		for (const pair of pairs.reverse()) {
 			if (!pair.start.parentNode || !pair.end.parentNode) continue;
 			const host = createDiv();
-			const range = document.createRange();
+			const range = el.doc.createRange();
 			range.setStartAfter(pair.start);
 			range.setEndBefore(pair.end);
 			host.appendChild(range.extractContents());
