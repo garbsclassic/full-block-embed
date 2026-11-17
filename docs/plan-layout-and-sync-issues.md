@@ -59,8 +59,12 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
 - Before/after screenshots of live preview and reading view in Obsidian; reference text inset matches a normal paragraph
 - Unclosed marker typed by hand: no toast, status bar count, selecting it opens the line, clears once fixed
 - `data.json` writes while typing: 4 in ~5s, each ~100ms after a note autosave
-- Not verified in Obsidian: deleting a reference shows no toast, and hover controls after the margin trim (synthetic hover didn't trigger them)
-- The checks above predate `b067cde` and the review fixes; the issue keying, rename and index-drop clearing are covered by unit tests only
+- Re-checked at `a8e1ba0` in the kb vault (Obsidian 1.15.1, scratch notes since removed):
+  - Reference renders in live preview and reading view
+  - Typing `<!--#typed` a key at a time shows nothing; the unclosed `<!--#typed+-->` shows `Sync paused: 1 issue` with no toast; selecting it opens the line; closing the block clears it
+  - Deleting a source block while its reference is open shows `fbeverify: expected exactly one source, found 0`; undo clears it
+  - **Delete current shared block reference** removes the reference with no toast and no issue
+- Not verified in Obsidian: hover controls (synthetic hover doesn't trigger them), the mobile toast, rename, and outside-Obsidian edits; those are covered by unit tests only
 
 ## Caveats
 
