@@ -40,7 +40,7 @@ export interface EditingActions extends EmbeddedEditorHost {
 		},
 		editedInObsidian: boolean,
 	) => void;
-	unobserveEditor: (owner: object) => void;
+	unobserveEditor: (owner: object, markersRemovedFrom?: string) => void;
 }
 
 const referenceEditors = new WeakMap<HTMLElement, EmbeddedBlockEditor>();
@@ -65,12 +65,7 @@ class ReferenceEditorWidget extends WidgetType {
 	}
 
 	toDOM(view: CodeMirrorEditorView): HTMLElement {
-		const host = createDiv({
-			cls: [
-				'full-block-embed-reference',
-				'full-block-embed-editing-reference',
-			],
-		});
+		const host = createDiv({ cls: 'full-block-embed-reference' });
 		host.dataset.sharedBlockId = this.block.id;
 		const controls = host.createDiv({
 			cls: 'full-block-embed-reading-controls',
@@ -196,12 +191,6 @@ function decorations(
 			);
 			continue;
 		}
-		for (let line = block.startLine + 1; line < block.endLine; line++)
-			ranges.push(
-				Decoration.line({
-					class: 'full-block-embed-source-editing-line',
-				}).range(state.doc.line(line + 1).from),
-			);
 		const first = state.doc.lineAt(
 			Math.min(block.bodyStart, state.doc.length),
 		);
@@ -215,16 +204,6 @@ function decorations(
 				widget: new BlockControlsWidget(block, actions),
 				side: 1,
 			}).range(first.to),
-		);
-		ranges.push(
-			Decoration.line({ class: 'full-block-embed-marker-line' }).range(
-				state.doc.line(block.startLine + 1).from,
-			),
-		);
-		ranges.push(
-			Decoration.line({ class: 'full-block-embed-marker-line' }).range(
-				state.doc.line(block.endLine + 1).from,
-			),
 		);
 	}
 	return Decoration.set(ranges, true);
@@ -259,7 +238,7 @@ export function editingExtension(actions: EditingActions): Extension {
 					?.path;
 				const text = this.view.state.doc.toString();
 				if (!path || !text.includes('<!--#')) {
-					actions.unobserveEditor(this);
+					actions.unobserveEditor(this, path);
 					return;
 				}
 				actions.observeEditor(
@@ -344,12 +323,6 @@ export function viewportExtension(
 		);
 		if (!block) return Decoration.none;
 		const ranges: Array<Range<Decoration>> = [];
-		for (const position of [block.start, block.bodyEnd])
-			ranges.push(
-				Decoration.line({
-					class: 'full-block-embed-marker-line',
-				}).range(position),
-			);
 		if (block.start > 0)
 			ranges.push(
 				Decoration.replace({ block: true }).range(0, block.start),

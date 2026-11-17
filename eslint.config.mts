@@ -29,6 +29,7 @@ export default defineConfig(
 						'eslint.config.mts',
 						'manifest.json',
 						'tests/*.test.ts',
+						'tests/stubs/*.ts',
 					],
 				},
 				tsconfigRootDir: import.meta.dirname,

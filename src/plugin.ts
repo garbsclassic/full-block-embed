@@ -6,6 +6,7 @@ import {
 	MarkdownRenderer,
 	Menu,
 	Notice,
+	Platform,
 	Plugin,
 	TFile,
 } from 'obsidian';
@@ -24,8 +25,8 @@ import { BlockSyncManager, type LegacyStoredSyncData } from './sync-manager';
 import { BlockPicker, ConfirmModal, IdModal } from './ui';
 
 export default class FullBlockEmbed extends Plugin {
-	private lastError = '';
-	private lastIssues: string[] = [];
+	private issueStatus!: HTMLElement;
+	private issuesByPath = new Map<string, string[]>();
 	private readingView: ReadingViewRenderer | null = null;
 	private pendingReadingFiles = new Map<string, string | undefined>();
 	private readingRefreshFrame: number | null = null;
@@ -33,12 +34,15 @@ export default class FullBlockEmbed extends Plugin {
 	private sync!: BlockSyncManager;
 
 	async onload(): Promise<void> {
+		this.issueStatus = this.addStatusBarItem();
+		this.issueStatus.addClass('mod-clickable');
+		this.issueStatus.hide();
+		this.registerDomEvent(this.issueStatus, 'click', () =>
+			this.openFirstIssue(),
+		);
 		this.sync = new BlockSyncManager(this, {
-			onIssues: (errors) => this.handleSyncIssues(errors),
-			onClearIssues: () => {
-				this.lastError = '';
-				this.lastIssues = [];
-			},
+			onIssues: (issues) => this.handleSyncIssues(issues),
+			onClearIssues: (paths) => this.clearSyncIssues(paths),
 			onFilesChanged: (files) => this.refreshReadingViews(files),
 		});
 		this.sync.load((await this.loadData()) as LegacyStoredSyncData | null);
@@ -66,8 +70,8 @@ export default class FullBlockEmbed extends Plugin {
 			}),
 		);
 		const editingActions: EditingActions = {
-			renderPreview: (container, block, livePreview, owner) =>
-				this.renderPreview(container, block, livePreview, owner),
+			renderPreview: (container, block, owner) =>
+				this.renderPreview(container, block, owner),
 			mountLiveEditor: (container, id, livePreview, contentChanged) =>
 				this.sourceEditor.mount(
 					container,
@@ -91,7 +95,8 @@ export default class FullBlockEmbed extends Plugin {
 					document,
 					editedInObsidian,
 				),
-			unobserveEditor: (owner) => this.sync.unobserve(owner),
+			unobserveEditor: (owner, markersRemovedFrom) =>
+				this.sync.unobserve(owner, markersRemovedFrom),
 		};
 		this.registerEditorExtension(editingExtension(editingActions));
 		this.readingView = new ReadingViewRenderer(this.app, {
@@ -109,7 +114,10 @@ export default class FullBlockEmbed extends Plugin {
 		this.addCommand({
 			id: 'sync-now',
 			name: 'Synchronize shared blocks now',
-			callback: () => void this.sync.synchronizeAll(),
+			callback: async () => {
+				await this.sync.synchronizeAll();
+				if (this.issues.length) new Notice(this.issueSummary);
+			},
 		});
 		this.addCommand({
 			id: 'create-shared-block',
@@ -165,9 +173,8 @@ export default class FullBlockEmbed extends Plugin {
 			id: 'open-shared-block-sync-issue',
 			name: 'Open first shared block sync issue',
 			checkCallback: (checking) => {
-				if (!this.lastIssues.length) return false;
-				if (!checking)
-					void this.sourceEditor.openIssue(this.lastIssues[0]!);
+				if (!this.issues.length) return false;
+				if (!checking) this.openFirstIssue();
 				return true;
 			},
 		});
@@ -288,41 +295,17 @@ export default class FullBlockEmbed extends Plugin {
 	private async renderPreview(
 		container: HTMLElement,
 		block: Block,
-		livePreview: boolean,
 		owner: Component,
 	): Promise<void> {
 		container.empty();
-		if (livePreview) {
-			container.addClass('full-block-embed-live-preview');
-			await MarkdownRenderer.render(
-				this.app,
-				block.body,
-				container,
-				block.path,
-				owner,
-			);
-			return;
-		}
-		const previewBlock =
-			(await this.sync.findSource(block.id))?.block ?? block;
-		container.addClass('full-block-embed-source-preview');
-		container.createDiv({
-			cls: 'full-block-embed-marker-line',
-			text: `<!--#${previewBlock.id}+-->`,
-		});
-		container.createDiv({
-			cls: [
-				'full-block-embed-source-preview-body',
-				...(previewBlock.body
-					? []
-					: ['full-block-embed-empty-preview']),
-			],
-			text: previewBlock.body || `Select to edit ${previewBlock.id}`,
-		});
-		container.createDiv({
-			cls: 'full-block-embed-marker-line',
-			text: `<!--#${previewBlock.id}/-->`,
-		});
+		container.addClass('full-block-embed-live-preview');
+		await MarkdownRenderer.render(
+			this.app,
+			block.body,
+			container,
+			block.path,
+			owner,
+		);
 	}
 	private blockAtCursor(
 		editor: Editor,
@@ -349,7 +332,6 @@ export default class FullBlockEmbed extends Plugin {
 			editor.offsetToPos(block.start),
 			editor.offsetToPos(block.end),
 		);
-		new Notice(`Deleted reference ${block.id}`);
 	}
 	private removeReferenceInEditor(
 		view: CodeMirrorEditorView,
@@ -370,7 +352,6 @@ export default class FullBlockEmbed extends Plugin {
 		view.dispatch({
 			changes: { from: latest.start, to: latest.end, insert: '' },
 		});
-		new Notice(`Deleted reference ${block.id}`);
 	}
 	private async removeReferenceFromFile(
 		path: string,
@@ -403,7 +384,6 @@ export default class FullBlockEmbed extends Plugin {
 					);
 				return removeBlock(current, target);
 			});
-			new Notice(`Deleted reference ${id}`);
 		} catch (error) {
 			new Notice(String(error), 8000);
 		}
@@ -477,7 +457,6 @@ export default class FullBlockEmbed extends Plugin {
 				);
 			}
 			await this.sync.forget(id);
-			new Notice(`Converted ${id} and all of its copies to normal text`);
 		} catch (error) {
 			new Notice(String(error), 10000);
 		}
@@ -566,29 +545,49 @@ export default class FullBlockEmbed extends Plugin {
 			);
 		}).open();
 	}
-	private handleSyncIssues(errors: string[]): void {
-		this.lastIssues = errors;
-		const message = errors.join('\n');
-		if (message === this.lastError) return;
-		this.lastError = message;
-		this.showSyncIssue(errors[0]!, errors.length);
+	private get issues(): string[] {
+		return [...new Set([...this.issuesByPath.values()].flat())];
 	}
-	private showSyncIssue(issue: string, count: number): void {
-		const content = createFragment();
-		const wrapper = createDiv({
-			cls: 'full-block-embed-issue-notice',
+
+	private get issueSummary(): string {
+		const count = this.issues.length;
+		return `Sync paused: ${count} issue${count === 1 ? '' : 's'}`;
+	}
+
+	private openFirstIssue(): void {
+		const first = this.issues[0];
+		if (first) void this.sourceEditor.openIssue(first);
+	}
+
+	private handleSyncIssues(issues: Map<string, string[]>): void {
+		this.updateIssues(() => {
+			for (const [path, errors] of issues)
+				if (errors.length) this.issuesByPath.set(path, errors);
+				else this.issuesByPath.delete(path);
 		});
-		wrapper.createDiv({
-			text: `Shared block sync paused: ${issue}${count > 1 ? ` (+${count - 1} more)` : ''}`,
+	}
+
+	// The '' key holds issues from an interrupted pass that had no paths, so any
+	// successful pass clears it.
+	private clearSyncIssues(paths: string[]): void {
+		this.updateIssues(() => {
+			for (const path of [...paths, '']) this.issuesByPath.delete(path);
 		});
-		if (/^(.*):(\d+): /.test(issue)) {
-			const button = wrapper.createEl('button', { text: 'Open issue' });
-			button.addEventListener(
-				'click',
-				() => void this.sourceEditor.openIssue(issue),
-			);
+	}
+
+	private updateIssues(change: () => void): void {
+		const wasEmpty = !this.issues.length;
+		change();
+		const [first] = this.issues;
+		if (first === undefined) {
+			this.issueStatus.hide();
+			return;
 		}
-		content.appendChild(wrapper);
-		new Notice(content, 12000);
+		this.issueStatus.setText(this.issueSummary);
+		this.issueStatus.setAttr('aria-label', first);
+		this.issueStatus.show();
+		// Mobile has no status bar, so announce the pause once rather than per pass.
+		if (wasEmpty && Platform.isMobile)
+			new Notice(`Shared block sync paused: ${first}`);
 	}
 }

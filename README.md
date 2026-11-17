@@ -179,7 +179,7 @@ A full plan is good for user review and an LLM in some contexts, but only some s
 
 - **Nested Blocks** – blocks may be nested. Nested children synchronize before parents. When a parent source block contains child source blocks, the child source markers change from `+` to `=` when copied to reference blocks.
 
-- **Conflict Behavior** – The plugin never chooses a winner for divergent copies and raises an error for circular nesting, malformed or unclosed markers, duplicate sources, and missing sources. A conflict or error pauses writes and shows a notice. Issues can be opened with the command `Open first shared block sync issue`. If every copy is later made identical, that content becomes the new synchronization baseline automatically and clears the conflict.
+- **Conflict Behavior** – The plugin never chooses a winner for divergent copies and raises an error for circular nesting, malformed or unclosed markers, duplicate sources, and missing sources. A conflict or error pauses writes and shows a **Sync paused** indicator in the status bar; selecting it opens the first issue. On mobile, which has no status bar, a single toast appears when sync pauses; use the command `Open first shared block sync issue` to open the issue. If every copy is later made identical, that content becomes the new synchronization baseline automatically and clears the conflict.
 
 - **Editing Outside Obsidian** – blocks synchronize when a note is opened in Obsidian, or a vault-wide sync can be manually triggered. Conflicting copies raise warnings without overwriting. Newly inserted reference blocks are hydrated from the source block.
 

@@ -35,8 +35,8 @@ npm run build
 
 ## Checks
 
-- Run `npm run check` to execute the unit tests, TypeScript type-check, and production build.
-- A GitHub Action runs the same check on every commit and pull request.
+- Run `npm run check` to lint and run the unit tests. It doesn't type-check or build: `npm run build` does both (`tsc -noEmit`, then the production bundle).
+- A GitHub Action runs lint, the unit tests, and the build on every push and pull request.
 
 ## File & folder conventions
 

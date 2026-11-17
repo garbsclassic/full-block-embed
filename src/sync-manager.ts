@@ -44,8 +44,9 @@ interface IndexedFile {
 }
 
 export interface SyncManagerCallbacks {
-	onIssues(errors: string[]): void;
-	onClearIssues(): void;
+	/** Issues for every path a pass covered; an empty list means that path is clear. */
+	onIssues(issues: Map<string, string[]>): void;
+	onClearIssues(paths: string[]): void;
 	onFilesChanged(files: FileText[]): void;
 }
 
@@ -73,6 +74,8 @@ export class BlockSyncManager {
 	private indexPromise: Promise<void> | null = null;
 	private syncTimer: number | null = null;
 	private dirtyTimer: number | null = null;
+	private lastSaved = '';
+	private saveQueue: Promise<void> = Promise.resolve();
 	private running = false;
 	private rerun = false;
 	private observationRevision = 0;
@@ -123,7 +126,7 @@ export class BlockSyncManager {
 		const ids = markerIds(text, parsed.blocks);
 		const previous = this.observations.get(owner);
 		if (!ids.size && !parsed.errors.length) {
-			if (previous) this.unobserve(owner);
+			this.unobserve(owner, path);
 			return;
 		}
 		if (editedInObsidian && previous?.path === path)
@@ -142,8 +145,13 @@ export class BlockSyncManager {
 		if (requested.size) this.queue(requested, previous ? SYNC_DELAY : 0);
 	}
 
-	unobserve(owner: object): void {
-		if (!this.observations.delete(owner)) return;
+	/** Pass `markersRemovedFrom` when the owner's note lost its last marker, to clear its issues. */
+	unobserve(owner: object, markersRemovedFrom?: string): void {
+		const observation = this.observations.get(owner);
+		if (!observation) return;
+		this.observations.delete(owner);
+		if (observation.path === markersRemovedFrom)
+			this.callbacks.onClearIssues([markersRemovedFrom]);
 		this.rebuildActiveIds();
 		for (const id of this.queuedIds)
 			if (!this.activeIds.has(id)) this.queuedIds.delete(id);
@@ -295,13 +303,14 @@ export class BlockSyncManager {
 		try {
 			const scope = await this.expandNestedScope(ids);
 			ids = scope.ids;
+			const paths = scope.files.map((file) => file.path);
 			// Always re-read all known copies for the requested IDs. The index only
 			// locates files; hashes decide whether an outside edit is safe to apply.
 			let scanned = scope.files;
 			const order = nestedSyncOrder(scanned, ids);
 			if (order.errors.length) {
 				await this.persist();
-				this.callbacks.onIssues(order.errors);
+				this.callbacks.onIssues(issuesByPath(paths, order.errors));
 				return;
 			}
 			let nextHashes = this.hashes;
@@ -320,7 +329,7 @@ export class BlockSyncManager {
 				);
 				if (plan.errors.length) {
 					await this.persist();
-					this.callbacks.onIssues(plan.errors);
+					this.callbacks.onIssues(issuesByPath(paths, plan.errors));
 					return;
 				}
 				const patchesByPath = groupPatchesByPath(plan.patches);
@@ -342,7 +351,7 @@ export class BlockSyncManager {
 				nextRefs = plan.nextRefs;
 				scanned = updated;
 			}
-			this.callbacks.onClearIssues();
+			this.callbacks.onClearIssues(paths);
 			for (const stage of stages)
 				for (const [path, patches] of stage.patchesByPath)
 					await this.applyFilePatches(path, patches, stage.files);
@@ -370,9 +379,10 @@ export class BlockSyncManager {
 				'Full Block Embed: synchronization interrupted',
 				error,
 			);
-			this.callbacks.onIssues([
-				`Synchronization interrupted: ${String(error)}`,
-			]);
+			// The scope may not exist yet, so there are no paths to key the issue by.
+			this.callbacks.onIssues(
+				new Map([['', [`Synchronization interrupted: ${String(error)}`]]]),
+			);
 		} finally {
 			this.running = false;
 			if (this.rerun || this.queuedIds.size) {
@@ -686,16 +696,40 @@ export class BlockSyncManager {
 				this.localChanges.delete(key);
 	}
 
-	private async persist(): Promise<void> {
-		await this.plugin.saveData(
-			createStoredSyncData(
-				this.hashes,
-				this.knownRefs,
-				this.savedSourcePaths,
-				this.files,
-			),
-		);
+	// One save runs at a time, so lastSaved always matches the newest save requested.
+	private persist(): Promise<void> {
+		const run = this.saveQueue.then(() => this.save());
+		this.saveQueue = run.catch(() => undefined);
+		return run;
 	}
+
+	private async save(): Promise<void> {
+		const data = createStoredSyncData(
+			this.hashes,
+			this.knownRefs,
+			this.savedSourcePaths,
+			this.files,
+		);
+		const serialized = JSON.stringify(data);
+		if (serialized === this.lastSaved) return;
+		await this.plugin.saveData(data);
+		this.lastSaved = serialized;
+	}
+}
+
+/**
+ * Files an error under the note it names (`path:line: …`), or under every path in the pass
+ * when it names none, so a healthy note sharing a pass isn't flagged with another's error.
+ */
+export function issuesByPath(paths: string[], errors: string[]): Map<string, string[]> {
+	// A pass with no files keeps its errors under '', which the next successful pass clears.
+	if (!paths.length) paths = [''];
+	const result = new Map(paths.map((path) => [path, [] as string[]]));
+	for (const error of errors) {
+		const owner = paths.find((path) => error.startsWith(`${path}:`));
+		for (const path of owner === undefined ? paths : [owner]) result.get(path)!.push(error);
+	}
+	return result;
 }
 
 function groupPatchesByPath(patches: Patch[]): Map<string, Patch[]> {

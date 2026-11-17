@@ -5,7 +5,6 @@ export interface EmbeddedEditorHost {
 	renderPreview(
 		container: HTMLElement,
 		block: Block,
-		livePreview: boolean,
 		owner: Component,
 	): Promise<void>;
 	mountLiveEditor(
@@ -136,7 +135,6 @@ export class EmbeddedBlockEditor extends MarkdownRenderChild {
 			await this.host.renderPreview(
 				preview,
 				this.block,
-				this.livePreview,
 				this,
 			);
 			if (

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Remove layout styles (gutters, highlight backgrounds, font overrides) so shared blocks use Obsidian's own layout
+- Show sync issues in a status bar indicator that opens the first issue, replacing the stacking toasts
+- Show one toast per pause on mobile, and a toast after **Synchronize shared blocks now** when issues remain
+- Remove the success toasts for deleting a reference and converting a source to normal text
+- Stop rewriting `data.json` when the synchronization data has not changed
+
 ## 1.0.3
 
 - Fix embedded reference editors to accept spaces and mouse input after activation and update in place during synchronization, preserving focus and cursor position
