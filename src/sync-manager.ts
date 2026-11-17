@@ -149,7 +149,10 @@ export class BlockSyncManager {
 		if (requested.size) this.queue(requested, previous ? SYNC_DELAY : 0);
 	}
 
-	/** Pass `markersRemovedFrom` when the owner's note lost its last marker, to clear its issues. */
+	/**
+	 * Pass `markersRemovedFrom` when the owner's note lost its last marker: the note leaves the
+	 * index, which clears its issues, and its blocks still open elsewhere are re-checked.
+	 */
 	unobserve(owner: object, markersRemovedFrom?: string): void {
 		const observation = this.observations.get(owner);
 		if (!observation) return;
@@ -189,9 +192,11 @@ export class BlockSyncManager {
 
 	markRenamed(file: TFile, oldPath: string): void {
 		const previous = this.files.get(oldPath)?.ids ?? new Set<string>();
-		// The note's markers move with it, so its issues follow instead of clearing.
+		// The note's markers and issues move with it; the dirty mark rescans it later.
 		this.callbacks.onRenameIssues(oldPath, file.path);
+		const indexed = this.files.get(oldPath);
 		this.removeIndexedPath(oldPath);
+		if (indexed) this.addIndexedPath(file.path, indexed);
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
@@ -319,12 +324,17 @@ export class BlockSyncManager {
 			const paths = scope.files.map((file) => file.path);
 			// Every note in scope is parsed, so its parse errors clear by path. Block errors
 			// clear only for the blocks this pass reached, keyed by block ID.
-			const issues = issuesByPath(paths, scope.errors);
+			const issues = new Map(scope.parseErrors);
 			const reportIssues = async (): Promise<void> => {
 				await this.persist();
+				// A note or ID that left the index mid-pass was already cleared, and nothing
+				// would re-check an issue reported for it now.
+				for (const path of paths) if (!this.files.has(path)) issues.delete(path);
+				for (const id of ids)
+					if (!this.pathsById.has(id)) issues.delete(blockIssueKey(id));
 				this.callbacks.onIssues(issues);
 			};
-			if (scope.errors.length) {
+			if ([...issues.values()].some((errors) => errors.length)) {
 				await reportIssues();
 				return;
 			}
@@ -429,12 +439,13 @@ export class BlockSyncManager {
 
 	private async expandNestedScope(
 		requested: ReadonlySet<string>,
-	): Promise<{ ids: Set<string>; files: FileText[]; errors: string[] }> {
-		const ids = new Set(requested);
+	): Promise<{ ids: Set<string>; files: FileText[]; parseErrors: Map<string, string[]> }> {
+		// An ID that left the index has no copies left, so there is nothing to synchronize.
+		const ids = new Set([...requested].filter((id) => this.pathsById.has(id)));
 		const paths = new Set<string>();
 		let changed = true;
 		let files: FileText[] = [];
-		let errors: string[] = [];
+		let parseErrors = new Map<string, string[]>();
 		while (changed) {
 			changed = false;
 			for (const id of ids)
@@ -444,10 +455,10 @@ export class BlockSyncManager {
 						changed = true;
 					}
 			files = await this.readFiles(paths);
-			errors = [];
+			parseErrors = new Map();
 			for (const file of files) {
-				const { blocks, errors: fileErrors } = parseFile(file.path, file.text);
-				errors.push(...fileErrors);
+				const { blocks, errors } = parseFile(file.path, file.text);
+				parseErrors.set(file.path, errors);
 				for (const parent of blocks) {
 					if (!ids.has(parent.id)) continue;
 					for (const child of blocks)
@@ -462,7 +473,7 @@ export class BlockSyncManager {
 				}
 			}
 		}
-		return { ids, files, errors };
+		return { ids, files, parseErrors };
 	}
 
 	private async applyFilePatches(
@@ -772,20 +783,6 @@ export class BlockSyncManager {
 		await this.plugin.saveData(data);
 		this.lastSaved = serialized;
 	}
-}
-
-/**
- * Files each parse error under the note it names (`path:line: …`), giving every other note
- * in the pass an empty list. An error naming no note in the pass waits for a clean pass.
- */
-export function issuesByPath(paths: string[], errors: string[]): Map<string, string[]> {
-	const result = new Map(paths.map((path) => [path, [] as string[]]));
-	for (const error of errors) {
-		const owner =
-			paths.find((path) => error.startsWith(`${path}:`)) ?? INTERRUPTED_ISSUE_KEY;
-		result.set(owner, [...(result.get(owner) ?? []), error]);
-	}
-	return result;
 }
 
 function groupPatchesByPath(patches: Patch[]): Map<string, Patch[]> {

@@ -23,7 +23,8 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
   - An interrupted pass has no scope, so it reports under `''`. Only a clean pass clears that key.
   - When a path or block ID leaves the marker index (note deleted, its last marker removed in an editor or outside Obsidian, or gone after a forced rescan), its issues clear, since no later pass covers it. Closing a tab clears nothing.
   - When an editor's note loses its last marker, its blocks that are still open elsewhere get a pass, as an edit would. A reference whose source was just removed then shows `x: expected exactly one source, found 0`. Closing a tab queues nothing.
-  - Renaming a note moves its issues to the new path and repoints messages that name the old path, so a closed note's issue stays visible.
+  - Renaming a note moves its issues and its index entry to the new path and repoints messages that start with the old path, so a closed note's issue stays visible and still clears if the note is then deleted.
+  - A pass skips IDs that already left the index (a half-typed marker, a deleted block), and drops issues for notes or IDs that left the index while it ran: their issues were already cleared, and nothing would re-check them.
 - Mobile has no status bar, so it shows one toast when the issue list goes from empty to non-empty, and relies on the **Open first shared block sync issue** command to open it. Desktop shows no toast.
 - **Synchronize shared blocks now** is an explicit action, so it shows `Sync paused: N issues` when issues remain after it runs and nothing otherwise. It waits for a pass that is already running, then runs its own, so the toast reflects the full pass rather than the state before it.
 - The non-live-preview branch of `renderPreview` and the `source-editing-line`, `marker-line` and `editing-reference` classes are removed: the CSS that styled them is gone, and `ReferenceEditorWidget` is only built in live preview. For the same reason the widget no longer passes a `livePreview` flag down to the embedded editor, which always opens in live preview.
@@ -47,6 +48,10 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
 - [x] Review fix: drop the always-true `livePreview` parameter
 - [x] Review fix: tests for the tab-switch unobserve case and the plugin's visible issue list
 - [x] Re-check open copies when an editor removes a note's last marker
+- [x] Second reviewer pass over `b067cde..HEAD`
+- [x] Review fix: skip IDs that left the index, so typed or deleted markers leave no issue
+- [x] Review fix: rename moves the index entry, so rename-then-delete clears
+- [x] Review fix: manager-level test for the nesting-cycle key
 
 ## Verification
 
@@ -60,6 +65,8 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
 ## Caveats
 
 - Without the right gutter, hover controls overlap the end of a reference's first line in live preview. Removing the hover controls is the follow-up if that bothers in use.
+- A note whose only marker is malformed with no readable ID (`<!--# x+-->`) is never in a pass, so it shows no issue. This predates the branch.
+- Rename rewrites only messages that start with the old path; one naming it mid-message (`foo: conflicting edits in A.md, B.md`) keeps the old name until the next pass for that block.
 - A reference in a closed note that loses its source shows no issue until that note is opened or **Synchronize shared blocks now** runs, because automatic passes cover only blocks open in an editor.
 - A closed note fixed while no shared block is open stays listed until **Synchronize shared blocks now**, because `markModified` only drains dirty paths while blocks are active. This also predates the branch.
 - The tests mirror the plugin's three-line callback wiring into `SyncIssues` rather than exercising `plugin.ts`.

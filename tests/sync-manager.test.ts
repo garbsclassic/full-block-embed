@@ -12,7 +12,7 @@ const obsidianStub = fileURLToPath(new URL('./stubs/obsidian.ts', import.meta.ur
 // class the fake vault instantiates, or the manager's `instanceof TFile` checks reject every note.
 const loader = createJiti(import.meta.url, { alias: { obsidian: obsidianStub } });
 const { TFile } = await loader.import<typeof ObsidianStub>(obsidianStub);
-const { BlockSyncManager, issuesByPath } = await loader.import<typeof SyncManagerModule>(
+const { BlockSyncManager } = await loader.import<typeof SyncManagerModule>(
 	'../src/sync-manager.ts',
 );
 const { SyncIssues } = await loader.import<typeof SyncIssuesModule>('../src/sync-issues.ts');
@@ -28,10 +28,15 @@ const BROKEN_B = '<!--#bar+-->\nb\n';
 const FIXED_B = '<!--#bar+-->\nb\n<!--#bar/-->\n';
 const CLEAN_C = '<!--#baz+-->\nc\n<!--#baz/-->\n<!--#baz=-->\nc\n<!--#baz/-->\n';
 const UNSYNCED_A = '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\n<!--#foo/-->\n';
+const X_SOURCE = '<!--#x+-->\nx\n<!--#x/-->\n';
+const Y_SOURCE = '<!--#y+-->\ny\n<!--#y/-->\n';
 const A_FOO_ERROR = 'A.md:2: unclosed source block foo (closing marker is missing)';
+const B_FOO_ERROR = 'B.md:2: unclosed source block foo (closing marker is missing)';
 const B_BAR_ERROR = 'B.md:1: unclosed source block bar (closing marker is missing)';
 const X_NO_SOURCE_ERROR = 'x: expected exactly one source, found 0';
 const Y_NO_SOURCE_ERROR = 'y: expected exactly one source, found 0';
+const N_NO_SOURCE_ERROR = 'n: expected exactly one source, found 0';
+const CYCLE_A_ERROR = 'a: circular nested shared blocks (a -> b -> a)';
 
 function storedWith(hashes: Record<string, string>) {
 	return { version: 3, hashes, knownRefs: {}, sourcePaths: {}, files: {} };
@@ -80,6 +85,10 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 		// Stands in for saving an edit, so later passes read the new text from the vault.
 		write: (path: string, text: string) => {
 			texts.set(path, text);
+		},
+		// Stands in for a note deleted or renamed away, so a later full scan no longer finds it.
+		remove: (path: string) => {
+			texts.delete(path);
 		},
 		// The next write rejects, as a failed vault write does, and leaves the note unchanged.
 		failNextProcess: (error: Error) => {
@@ -173,6 +182,18 @@ function clockTest(name: string, body: (t: TestContext) => Promise<void>): void 
 		useVirtualClock(t);
 		await body(t);
 	});
+}
+
+async function synchronizeAllOnClock(
+	t: TestContext,
+	manager: SyncManagerModule.BlockSyncManager,
+): Promise<void> {
+	let settled = false;
+	const full = manager.synchronizeAll().then(() => {
+		settled = true;
+	});
+	await runUntil(t, () => settled);
+	await full;
 }
 
 test('first persist after construction calls saveData even when nothing changed', async () => {
@@ -676,52 +697,125 @@ clockTest('a tab that moves from a broken note to a marker-free one clears nothi
 	assert.deepEqual(visible.list, []);
 });
 
-test('a path-prefixed error is filed under its note only', () => {
-	assert.deepEqual(Object.fromEntries(issuesByPath(['A.md', 'B.md'], [A_FOO_ERROR])), {
-		'A.md': [A_FOO_ERROR],
-		'B.md': [],
+clockTest('a marker typed by hand reports only the open ID, then clears', async (t) => {
+	const editor = {};
+	const { manager, vault, issues, clears, visible } = createManager({
+		vault: createVault({ 'A.md': Y_SOURCE }),
 	});
-});
+	const reports = () => issues.length + clears.length;
+	manager.observe(editor, 'A.md', Y_SOURCE);
+	await runUntil(t, () => clears.length === 1);
 
-test('an error naming no note in the pass is filed under the empty key', () => {
-	const conflict = 'foo: conflicting edits in A.md, B.md';
-	const elsewhere = 'C.md:1: unclosed source block x (closing marker is missing)';
-
-	assert.deepEqual(
-		Object.fromEntries(issuesByPath(['A.md', 'B.md'], [conflict, elsewhere])),
-		{
-			'': [conflict, elsewhere],
-			'A.md': [],
-			'B.md': [],
-		},
-	);
-});
-
-test("a note and a same-named note in a subfolder do not capture each other's errors", () => {
-	const subError = 'sub/a.md:1: unclosed source block x (closing marker is missing)';
-	const rootError = 'a.md:3: unclosed source block y (closing marker is missing)';
-
-	// A substring match would let 'a.md' capture 'sub/a.md:' errors in one of these orders.
-	for (const paths of [
-		['sub/a.md', 'a.md'],
-		['a.md', 'sub/a.md'],
-	]) {
-		assert.deepEqual(Object.fromEntries(issuesByPath(paths, [subError, rootError])), {
-			'sub/a.md': [subError],
-			'a.md': [rootError],
-		});
+	// Each keystroke's pass ends in one report, so the next keystroke waits for it.
+	const keystrokes: Array<[string, string[]]> = [
+		[`${Y_SOURCE}<!--#n\n`, ['n: expected exactly one source, found 0']],
+		[`${Y_SOURCE}<!--#ne\n`, ['ne: expected exactly one source, found 0']],
+		[`${Y_SOURCE}<!--#new\n`, ['new: expected exactly one source, found 0']],
+		[`${Y_SOURCE}<!--#new+-->\nc\n<!--#new/-->\n`, []],
+	];
+	for (const [text, shown] of keystrokes) {
+		vault.write('A.md', text);
+		manager.observe(editor, 'A.md', text, undefined, true);
+		const mark = reports();
+		await runUntil(t, () => reports() > mark);
+		assert.deepEqual(visible.list, shown);
 	}
+
+	await synchronizeAllOnClock(t, manager);
+	assert.deepEqual(visible.list, []);
 });
 
-test('a pass with no notes keeps its errors under the empty key', () => {
-	assert.deepEqual(Object.fromEntries(issuesByPath([], [A_FOO_ERROR])), {
-		'': [A_FOO_ERROR],
+clockTest('deleting a whole source block leaves no issue for the removed ID', async (t) => {
+	const editor = {};
+	const { manager, vault, issues, clears, visible } = createManager({
+		vault: createVault({ 'A.md': X_SOURCE + Y_SOURCE }),
 	});
+	const reports = () => issues.length + clears.length;
+	manager.observe(editor, 'A.md', X_SOURCE + Y_SOURCE);
+	await runUntil(t, () => clears.length === 1);
+
+	// The x block goes in one edit, so x leaves the index as soon as the edit is observed.
+	vault.write('A.md', Y_SOURCE);
+	manager.observe(editor, 'A.md', Y_SOURCE, undefined, true);
+	const mark = reports();
+	await runUntil(t, () => reports() > mark);
+	assert.deepEqual(visible.list, []);
+
+	await synchronizeAllOnClock(t, manager);
+	assert.deepEqual(visible.list, []);
 });
 
-test('an empty error list gives every note in the pass an empty list', () => {
-	assert.deepEqual(Object.fromEntries(issuesByPath(['A.md', 'B.md'], [])), {
-		'A.md': [],
-		'B.md': [],
+clockTest('renaming then deleting a closed broken note clears its parse error', async (t) => {
+	const { manager, vault, visible } = createManager({
+		vault: createVault({ 'A.md': BROKEN_A }),
 	});
+	await synchronizeAllOnClock(t, manager);
+	assert.deepEqual(visible.list, [A_FOO_ERROR]);
+
+	// No editor shows the note, so the rename and the delete arrive as vault events.
+	vault.remove('A.md');
+	vault.write('B.md', BROKEN_A);
+	manager.markRenamed(eventFile('B.md'), 'A.md');
+	assert.deepEqual(visible.list, [B_FOO_ERROR]);
+
+	vault.remove('B.md');
+	manager.markDeleted(eventFile('B.md'));
+	assert.deepEqual(visible.list, []);
+
+	await synchronizeAllOnClock(t, manager);
+	assert.deepEqual(visible.list, []);
+});
+
+clockTest('a nesting cycle reports under its block ID until a clean pass clears it', async (t) => {
+	const N1 = '<!--#a+-->\n<!--#b=-->\nq\n<!--#b/-->\n<!--#a/-->\n';
+	const N2 = '<!--#b+-->\nq\n<!--#a=-->\nq\n<!--#a/-->\n<!--#b/-->\n';
+	const FIXED_N2 = '<!--#b+-->\nq\n<!--#b/-->\n';
+	const ownerOne = {};
+	const ownerTwo = {};
+	const { manager, vault, issues, clears, visible } = createManager({
+		vault: createVault({ 'N1.md': N1, 'N2.md': N2 }),
+	});
+	manager.observe(ownerOne, 'N1.md', N1);
+	manager.observe(ownerTwo, 'N2.md', N2);
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(issues, [{ 'N1.md': [], 'N2.md': [], 'block:a': [CYCLE_A_ERROR] }]);
+	assert.deepEqual(visible.list, [CYCLE_A_ERROR]);
+
+	// N2 drops its reference to a, which breaks the cycle; the next pass covers both IDs.
+	vault.write('N2.md', FIXED_N2);
+	manager.observe(ownerTwo, 'N2.md', FIXED_N2, undefined, true);
+	await runUntil(t, () => clears.length === 1);
+	assert.deepEqual(sortedKeys(clears), [['', 'N1.md', 'N2.md', 'block:a', 'block:b']]);
+	assert.deepEqual(visible.list, []);
+});
+
+clockTest('a failed pass does not report an ID that left the index meanwhile', async (t) => {
+	const owner = {};
+	const N = '<!--#n=-->\nq\n<!--#n/-->\n';
+	const { manager, vault, saveCalls, completeSave, issues, visible } = createManager({
+		holdSaves: true,
+		vault: createVault({ 'A.md': N }),
+	});
+	manager.observe(owner, 'A.md', N);
+	// The first index save is held, so the pass waits until it is released.
+	await runUntil(t, () => saveCalls.length === 1);
+	completeSave();
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(visible.list, [N_NO_SOURCE_ERROR]);
+
+	// Appending a line changes the saved index, so the failed pass's report waits on a save.
+	const edited = `${N}plain\n`;
+	vault.write('A.md', edited);
+	manager.observe(owner, 'A.md', edited, undefined, true);
+	await runUntil(t, () => saveCalls.length === 2);
+
+	// The owner closes and the note is deleted while that report waits.
+	manager.unobserve(owner);
+	vault.remove('A.md');
+	manager.markDeleted(eventFile('A.md'));
+	assert.deepEqual(visible.list, []);
+
+	completeSave();
+	await runUntil(t, () => issues.length === 2);
+	assert.deepEqual(visible.list, []);
 });
