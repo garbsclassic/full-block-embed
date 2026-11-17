@@ -25,7 +25,6 @@ export class SourceEditor {
 	async mount(
 		container: HTMLElement,
 		id: string,
-		livePreview: boolean,
 		contentChanged: () => void,
 	): Promise<WorkspaceLeaf | null> {
 		const source = await this.findSource(id);
@@ -50,7 +49,7 @@ export class SourceEditor {
 		const leaf = new EmbeddedLeaf(this.app);
 		try {
 			await leaf.openFile(source.file, {
-				state: { mode: 'source', source: !livePreview },
+				state: { mode: 'source', source: false },
 			});
 			const view = leaf.view;
 			if (!(view instanceof MarkdownView))
@@ -61,12 +60,7 @@ export class SourceEditor {
 			if (!editor.cm) throw new Error('Obsidian editor is not ready');
 			editor.cm.dispatch({
 				effects: StateEffect.appendConfig.of(
-					viewportExtension(
-						source.file.path,
-						id,
-						livePreview,
-						contentChanged,
-					),
+					viewportExtension(source.file.path, id, contentChanged),
 				),
 			});
 			const editorEl = editor.cm.dom.closest<HTMLElement>(
@@ -75,14 +69,6 @@ export class SourceEditor {
 			if (!editorEl)
 				throw new Error('Obsidian editor container is not ready');
 			editorEl.addClass('full-block-embed-embedded-view');
-			editorEl.toggleClass(
-				'full-block-embed-embedded-live-preview',
-				livePreview,
-			);
-			editorEl.toggleClass(
-				'full-block-embed-embedded-source-mode',
-				!livePreview,
-			);
 			loading.remove();
 			container.appendChild(editorEl);
 			window.requestAnimationFrame(() => {

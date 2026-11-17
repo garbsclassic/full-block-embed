@@ -72,13 +72,8 @@ export default class FullBlockEmbed extends Plugin {
 		const editingActions: EditingActions = {
 			renderPreview: (container, block, owner) =>
 				this.renderPreview(container, block, owner),
-			mountLiveEditor: (container, id, livePreview, contentChanged) =>
-				this.sourceEditor.mount(
-					container,
-					id,
-					livePreview,
-					contentChanged,
-				),
+			mountLiveEditor: (container, id, contentChanged) =>
+				this.sourceEditor.mount(container, id, contentChanged),
 			openSource: (id) => void this.sourceEditor.open(id),
 			removeReference: (view, block) =>
 				this.removeReferenceInEditor(view, block),

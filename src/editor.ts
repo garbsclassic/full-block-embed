@@ -48,7 +48,6 @@ const referenceEditors = new WeakMap<HTMLElement, EmbeddedBlockEditor>();
 class ReferenceEditorWidget extends WidgetType {
 	constructor(
 		private block: Block,
-		private livePreview: boolean,
 		private actions: EditingActions,
 	) {
 		super();
@@ -59,8 +58,7 @@ class ReferenceEditorWidget extends WidgetType {
 			other.block.id === this.block.id &&
 			other.block.path === this.block.path &&
 			other.block.start === this.block.start &&
-			other.block.body === this.block.body &&
-			other.livePreview === this.livePreview
+			other.block.body === this.block.body
 		);
 	}
 
@@ -90,7 +88,6 @@ class ReferenceEditorWidget extends WidgetType {
 			host.createDiv({ cls: 'full-block-embed-editor' }),
 			this.actions,
 			this.block,
-			this.livePreview,
 			() => view.requestMeasure(),
 		);
 		referenceEditors.set(host, component);
@@ -104,10 +101,7 @@ class ReferenceEditorWidget extends WidgetType {
 	}
 
 	updateDOM(dom: HTMLElement): boolean {
-		return (
-			referenceEditors.get(dom)?.update(this.block, this.livePreview) ??
-			false
-		);
+		return referenceEditors.get(dom)?.update(this.block) ?? false;
 	}
 
 	ignoreEvent(): boolean {
@@ -182,11 +176,7 @@ function decorations(
 			ranges.push(
 				Decoration.replace({
 					block: true,
-					widget: new ReferenceEditorWidget(
-						block,
-						livePreview,
-						actions,
-					),
+					widget: new ReferenceEditorWidget(block, actions),
 				}).range(block.start, block.end),
 			);
 			continue;
@@ -309,7 +299,6 @@ export function editingExtension(actions: EditingActions): Extension {
 export function viewportExtension(
 	path: string,
 	id: string,
-	livePreview: boolean,
 	contentChanged: () => void,
 ): Extension {
 	const focusChanged = StateEffect.define<boolean>();
@@ -334,7 +323,7 @@ export function viewportExtension(
 					text.length,
 				),
 			);
-		if (livePreview && !focused) {
+		if (!focused) {
 			const body = text.slice(block.bodyStart, block.bodyEnd);
 			for (const match of body.matchAll(/%%[\s\S]*?%%/g)) {
 				const from = block.bodyStart + (match.index ?? 0);

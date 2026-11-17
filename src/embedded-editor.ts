@@ -10,7 +10,6 @@ export interface EmbeddedEditorHost {
 	mountLiveEditor(
 		container: HTMLElement,
 		id: string,
-		livePreview: boolean,
 		contentChanged: () => void,
 	): Promise<WorkspaceLeaf | null>;
 }
@@ -25,7 +24,6 @@ export class EmbeddedBlockEditor extends MarkdownRenderChild {
 		containerEl: HTMLElement,
 		private host: EmbeddedEditorHost,
 		private block: Block,
-		private livePreview: boolean,
 		private mounted?: () => void,
 	) {
 		super(containerEl);
@@ -75,13 +73,11 @@ export class EmbeddedBlockEditor extends MarkdownRenderChild {
 		this.leaf = null;
 	}
 
-	update(block: Block, livePreview: boolean): boolean {
+	update(block: Block): boolean {
 		if (block.id !== this.block.id || block.path !== this.block.path)
 			return false;
-		const changed =
-			block.body !== this.block.body || livePreview !== this.livePreview;
+		const changed = block.body !== this.block.body;
 		this.block = block;
-		this.livePreview = livePreview;
 		// Keep a mounted editor and its focus intact while the outer reference is
 		// synchronized. An inactive preview can be refreshed in place.
 		if (changed && !this.activated) void this.showPreview();
@@ -101,7 +97,6 @@ export class EmbeddedBlockEditor extends MarkdownRenderChild {
 			const leaf = await this.host.mountLiveEditor(
 				this.containerEl,
 				this.block.id,
-				this.livePreview,
 				this.mounted ?? (() => undefined),
 			);
 			if (this.stopped) leaf?.detach();
