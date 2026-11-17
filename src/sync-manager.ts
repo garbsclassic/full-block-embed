@@ -11,6 +11,7 @@ import {
 	sourceChangeKey,
 } from './blocks';
 import { nestedSyncOrder, rebaseContainingFingerprints } from './nesting';
+import { blockIssueKey, INTERRUPTED_ISSUE_KEY } from './sync-issues';
 import {
 	createStoredSyncData,
 	LegacyStoredSyncData,
@@ -43,10 +44,12 @@ interface IndexedFile {
 	sourceIds: Set<string>;
 }
 
+/** Issue keys are note paths, `blockIssueKey(id)`, or `INTERRUPTED_ISSUE_KEY` (see sync-issues). */
 export interface SyncManagerCallbacks {
-	/** Issues for every path a pass covered; an empty list means that path is clear. */
+	/** Issues for every key a pass checked; an empty list means that key is clear. */
 	onIssues(issues: Map<string, string[]>): void;
-	onClearIssues(paths: string[]): void;
+	onClearIssues(keys: string[]): void;
+	onRenameIssues(from: string, to: string): void;
 	onFilesChanged(files: FileText[]): void;
 }
 
@@ -151,8 +154,7 @@ export class BlockSyncManager {
 		const observation = this.observations.get(owner);
 		if (!observation) return;
 		this.observations.delete(owner);
-		if (observation.path === markersRemovedFrom)
-			this.callbacks.onClearIssues([markersRemovedFrom]);
+		if (observation.path === markersRemovedFrom) this.setIndexedPath(markersRemovedFrom);
 		this.rebuildActiveIds();
 		for (const id of this.queuedIds)
 			if (!this.activeIds.has(id)) this.queuedIds.delete(id);
@@ -174,22 +176,21 @@ export class BlockSyncManager {
 
 	markDeleted(file: TFile): void {
 		const previous = this.files.get(file.path)?.ids ?? new Set<string>();
-		this.removeIndexedPath(file.path);
+		this.setIndexedPath(file.path);
 		this.dirtyPaths.delete(file.path);
 		this.indexValidated = false;
-		// No later pass covers this path, so its issues would never clear.
-		this.callbacks.onClearIssues([file.path]);
 		const affected = intersection(previous, this.activeIds);
 		if (affected.size) this.queue(affected, 0);
 	}
 
 	markRenamed(file: TFile, oldPath: string): void {
 		const previous = this.files.get(oldPath)?.ids ?? new Set<string>();
+		// The note's markers move with it, so its issues follow instead of clearing.
+		this.callbacks.onRenameIssues(oldPath, file.path);
 		this.removeIndexedPath(oldPath);
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		this.callbacks.onClearIssues([oldPath]);
 		for (const [id, path] of Object.entries(this.savedSourcePaths))
 			if (path === oldPath) this.savedSourcePaths[id] = file.path;
 		if (this.activeIds.size) this.scheduleDirtyPaths();
@@ -312,13 +313,28 @@ export class BlockSyncManager {
 			const scope = await this.expandNestedScope(ids);
 			ids = scope.ids;
 			const paths = scope.files.map((file) => file.path);
+			// Every note in scope is parsed, so its parse errors clear by path. Block errors
+			// clear only for the blocks this pass reached, keyed by block ID.
+			const issues = issuesByPath(paths, scope.errors);
+			const reportIssues = async (): Promise<void> => {
+				await this.persist();
+				this.callbacks.onIssues(issues);
+			};
+			if (scope.errors.length) {
+				await reportIssues();
+				return;
+			}
 			// Always re-read all known copies for the requested IDs. The index only
 			// locates files; hashes decide whether an outside edit is safe to apply.
 			let scanned = scope.files;
 			const order = nestedSyncOrder(scanned, ids);
 			if (order.errors.length) {
-				await this.persist();
-				this.callbacks.onIssues(issuesByPath(paths, order.errors));
+				// Each nesting error starts with the ID of the cycle it found.
+				for (const error of order.errors) {
+					const key = blockIssueKey(error.slice(0, error.indexOf(':')));
+					issues.set(key, [...(issues.get(key) ?? []), error]);
+				}
+				await reportIssues();
 				return;
 			}
 			let nextHashes = this.hashes;
@@ -335,9 +351,9 @@ export class BlockSyncManager {
 					new Set([id]),
 					this.localChanges,
 				);
+				issues.set(blockIssueKey(id), plan.errors);
 				if (plan.errors.length) {
-					await this.persist();
-					this.callbacks.onIssues(issuesByPath(paths, plan.errors));
+					await reportIssues();
 					return;
 				}
 				const patchesByPath = groupPatchesByPath(plan.patches);
@@ -359,7 +375,11 @@ export class BlockSyncManager {
 				nextRefs = plan.nextRefs;
 				scanned = updated;
 			}
-			this.callbacks.onClearIssues(paths);
+			this.callbacks.onClearIssues([
+				...paths,
+				...[...ids].map(blockIssueKey),
+				INTERRUPTED_ISSUE_KEY,
+			]);
 			for (const stage of stages)
 				for (const [path, patches] of stage.patchesByPath)
 					await this.applyFilePatches(path, patches, stage.files);
@@ -387,9 +407,11 @@ export class BlockSyncManager {
 				'Full Block Embed: synchronization interrupted',
 				error,
 			);
-			// The scope may not exist yet, so there are no paths to key the issue by.
+			// The scope may not exist yet, so the issue waits for any clean pass to clear it.
 			this.callbacks.onIssues(
-				new Map([['', [`Synchronization interrupted: ${String(error)}`]]]),
+				new Map([
+					[INTERRUPTED_ISSUE_KEY, [`Synchronization interrupted: ${String(error)}`]],
+				]),
 			);
 		} finally {
 			this.running = false;
@@ -403,11 +425,12 @@ export class BlockSyncManager {
 
 	private async expandNestedScope(
 		requested: ReadonlySet<string>,
-	): Promise<{ ids: Set<string>; files: FileText[] }> {
+	): Promise<{ ids: Set<string>; files: FileText[]; errors: string[] }> {
 		const ids = new Set(requested);
 		const paths = new Set<string>();
 		let changed = true;
 		let files: FileText[] = [];
+		let errors: string[] = [];
 		while (changed) {
 			changed = false;
 			for (const id of ids)
@@ -417,8 +440,10 @@ export class BlockSyncManager {
 						changed = true;
 					}
 			files = await this.readFiles(paths);
+			errors = [];
 			for (const file of files) {
-				const blocks = parseFile(file.path, file.text).blocks;
+				const { blocks, errors: fileErrors } = parseFile(file.path, file.text);
+				errors.push(...fileErrors);
 				for (const parent of blocks) {
 					if (!ids.has(parent.id)) continue;
 					for (const child of blocks)
@@ -433,7 +458,7 @@ export class BlockSyncManager {
 				}
 			}
 		}
-		return { ids, files };
+		return { ids, files, errors };
 	}
 
 	private async applyFilePatches(
@@ -544,7 +569,7 @@ export class BlockSyncManager {
 			const before = this.files.get(path)?.ids ?? new Set<string>();
 			const file = this.plugin.app.vault.getAbstractFileByPath(path);
 			if (file instanceof TFile) await this.scanFile(file);
-			else this.removeIndexedPath(path);
+			else this.setIndexedPath(path);
 			const after = this.files.get(path)?.ids ?? new Set<string>();
 			for (const id of [...before, ...after])
 				if (this.activeIds.has(id)) affected.add(id);
@@ -575,6 +600,8 @@ export class BlockSyncManager {
 	}
 
 	private async scanVault(): Promise<void> {
+		const previousPaths = [...this.files.keys()];
+		const previousIds = [...this.pathsById.keys()];
 		this.files.clear();
 		this.pathsById.clear();
 		this.sourcePathsById.clear();
@@ -585,6 +612,7 @@ export class BlockSyncManager {
 				await this.scanFile(file);
 			await yieldToUi();
 		}
+		this.clearIssuesLeftIndex(previousPaths, previousIds);
 		this.indexReady = true;
 		this.indexValidated = this.dirtyPaths.size === 0;
 		this.refreshAllSavedSourcePaths();
@@ -598,7 +626,7 @@ export class BlockSyncManager {
 			const file = this.plugin.app.vault.getAbstractFileByPath(path);
 			if (file instanceof TFile && file.extension === 'md')
 				candidates.set(path, file);
-			else this.removeIndexedPath(path);
+			else this.setIndexedPath(path);
 		}
 		const changed = [...candidates.values()].filter((file) => {
 			const indexed = this.files.get(file.path);
@@ -656,14 +684,30 @@ export class BlockSyncManager {
 				.filter((block) => block.kind === '+')
 				.map((block) => block.id),
 		);
+		this.setIndexedPath(path, {
+			mtime: mtime ?? stat?.mtime ?? 0,
+			size: size ?? stat?.size ?? text.length,
+			ids,
+			sourceIds,
+		});
+	}
+
+	/** Replaces a path's index entry; with no IDs to index, the path leaves the index. */
+	private setIndexedPath(path: string, indexed?: IndexedFile): void {
+		const previousIds = [...(this.files.get(path)?.ids ?? [])];
+		const wasIndexed = this.files.has(path);
 		this.removeIndexedPath(path);
-		if (ids.size)
-			this.addIndexedPath(path, {
-				mtime: mtime ?? stat?.mtime ?? 0,
-				size: size ?? stat?.size ?? text.length,
-				ids,
-				sourceIds,
-			});
+		if (indexed?.ids.size) this.addIndexedPath(path, indexed);
+		if (wasIndexed) this.clearIssuesLeftIndex([path], previousIds);
+	}
+
+	// No later pass covers a path or block that left the index, so its issues would never clear.
+	private clearIssuesLeftIndex(paths: string[], ids: string[]): void {
+		const gone = [
+			...paths.filter((path) => !this.files.has(path)),
+			...ids.filter((id) => !this.pathsById.has(id)).map(blockIssueKey),
+		];
+		if (gone.length) this.callbacks.onClearIssues(gone);
 	}
 
 	private addIndexedPath(path: string, indexed: IndexedFile): void {
@@ -727,16 +771,15 @@ export class BlockSyncManager {
 }
 
 /**
- * Files an error under the note it names (`path:line: …`), or under every path in the pass
- * when it names none, so a healthy note sharing a pass isn't flagged with another's error.
+ * Files each parse error under the note it names (`path:line: …`), giving every other note
+ * in the pass an empty list. An error naming no note in the pass waits for a clean pass.
  */
 export function issuesByPath(paths: string[], errors: string[]): Map<string, string[]> {
-	// A pass with no files keeps its errors under '', which the next successful pass clears.
-	if (!paths.length) paths = [''];
 	const result = new Map(paths.map((path) => [path, [] as string[]]));
 	for (const error of errors) {
-		const owner = paths.find((path) => error.startsWith(`${path}:`));
-		for (const path of owner === undefined ? paths : [owner]) result.get(path)!.push(error);
+		const owner =
+			paths.find((path) => error.startsWith(`${path}:`)) ?? INTERRUPTED_ISSUE_KEY;
+		result.set(owner, [...(result.get(owner) ?? []), error]);
 	}
 	return result;
 }

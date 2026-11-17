@@ -21,12 +21,13 @@ import {
 import { editingExtension, type EditingActions } from './editor';
 import { ReadingViewRenderer, type ReferenceLocator } from './reading-view';
 import { SourceEditor } from './source-editor';
+import { SyncIssues } from './sync-issues';
 import { BlockSyncManager, type LegacyStoredSyncData } from './sync-manager';
 import { BlockPicker, ConfirmModal, IdModal } from './ui';
 
 export default class FullBlockEmbed extends Plugin {
 	private issueStatus!: HTMLElement;
-	private issuesByPath = new Map<string, string[]>();
+	private issues = new SyncIssues();
 	private readingView: ReadingViewRenderer | null = null;
 	private pendingReadingFiles = new Map<string, string | undefined>();
 	private readingRefreshFrame: number | null = null;
@@ -41,8 +42,10 @@ export default class FullBlockEmbed extends Plugin {
 			this.openFirstIssue(),
 		);
 		this.sync = new BlockSyncManager(this, {
-			onIssues: (issues) => this.handleSyncIssues(issues),
-			onClearIssues: (paths) => this.clearSyncIssues(paths),
+			onIssues: (issues) => this.updateIssues(() => this.issues.report(issues)),
+			onClearIssues: (keys) => this.updateIssues(() => this.issues.clear(keys)),
+			onRenameIssues: (from, to) =>
+				this.updateIssues(() => this.issues.rename(from, to)),
 			onFilesChanged: (files) => this.refreshReadingViews(files),
 		});
 		this.sync.load((await this.loadData()) as LegacyStoredSyncData | null);
@@ -111,7 +114,7 @@ export default class FullBlockEmbed extends Plugin {
 			name: 'Synchronize shared blocks now',
 			callback: async () => {
 				await this.sync.synchronizeAll();
-				if (this.issues.length) new Notice(this.issueSummary);
+				if (this.issues.list.length) new Notice(this.issueSummary);
 			},
 		});
 		this.addCommand({
@@ -168,7 +171,7 @@ export default class FullBlockEmbed extends Plugin {
 			id: 'open-shared-block-sync-issue',
 			name: 'Open first shared block sync issue',
 			checkCallback: (checking) => {
-				if (!this.issues.length) return false;
+				if (!this.issues.list.length) return false;
 				if (!checking) this.openFirstIssue();
 				return true;
 			},
@@ -540,40 +543,20 @@ export default class FullBlockEmbed extends Plugin {
 			);
 		}).open();
 	}
-	private get issues(): string[] {
-		return [...new Set([...this.issuesByPath.values()].flat())];
-	}
-
 	private get issueSummary(): string {
-		const count = this.issues.length;
+		const count = this.issues.list.length;
 		return `Sync paused: ${count} issue${count === 1 ? '' : 's'}`;
 	}
 
 	private openFirstIssue(): void {
-		const first = this.issues[0];
+		const first = this.issues.list[0];
 		if (first) void this.sourceEditor.openIssue(first);
 	}
 
-	private handleSyncIssues(issues: Map<string, string[]>): void {
-		this.updateIssues(() => {
-			for (const [path, errors] of issues)
-				if (errors.length) this.issuesByPath.set(path, errors);
-				else this.issuesByPath.delete(path);
-		});
-	}
-
-	// The '' key holds issues from an interrupted pass that had no paths, so any
-	// successful pass clears it.
-	private clearSyncIssues(paths: string[]): void {
-		this.updateIssues(() => {
-			for (const path of [...paths, '']) this.issuesByPath.delete(path);
-		});
-	}
-
 	private updateIssues(change: () => void): void {
-		const wasEmpty = !this.issues.length;
+		const wasEmpty = !this.issues.list.length;
 		change();
-		const [first] = this.issues;
+		const [first] = this.issues.list;
 		if (first === undefined) {
 			this.issueStatus.hide();
 			return;
