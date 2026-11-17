@@ -78,11 +78,9 @@ npm run build
 
 ## Testing
 
-- Manual install for testing: copy `main.js`, `manifest.json`, `styles.css` (if any) to:
-    ```
-    <Vault>/.obsidian/plugins/<plugin-id>/
-    ```
-- Reload Obsidian and enable the plugin in **Settings → Community plugins**.
+- Install into a vault: copy `.env.example` to `.env` and set `OBSIDIAN_VAULT` to the vault root. `npm run build` then copies `main.js`, `manifest.json` and `styles.css` to `<Vault>/.obsidian/plugins/<plugin-id>/`, and `npm run dev` does so on every rebuild. Without `.env`, nothing is copied.
+- `npm run dev` rebuilds only when `src/` changes; after editing `styles.css` or `manifest.json` alone, rerun a build to copy them.
+- Enable the plugin in **Settings → Community plugins**. To skip toggling it after each build, install the **Hot Reload** community plugin in the vault and add an empty `.hotreload` file to the plugin folder.
 
 ## Commands & settings
 
