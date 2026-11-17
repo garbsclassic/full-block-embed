@@ -77,6 +77,7 @@ export class BlockSyncManager {
 	private lastSaved = '';
 	private saveQueue: Promise<void> = Promise.resolve();
 	private running = false;
+	private passDone: Promise<void> = Promise.resolve();
 	private rerun = false;
 	private observationRevision = 0;
 
@@ -176,6 +177,8 @@ export class BlockSyncManager {
 		this.removeIndexedPath(file.path);
 		this.dirtyPaths.delete(file.path);
 		this.indexValidated = false;
+		// No later pass covers this path, so its issues would never clear.
+		this.callbacks.onClearIssues([file.path]);
 		const affected = intersection(previous, this.activeIds);
 		if (affected.size) this.queue(affected, 0);
 	}
@@ -186,6 +189,7 @@ export class BlockSyncManager {
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
+		this.callbacks.onClearIssues([oldPath]);
 		for (const [id, path] of Object.entries(this.savedSourcePaths))
 			if (path === oldPath) this.savedSourcePaths[id] = file.path;
 		if (this.activeIds.size) this.scheduleDirtyPaths();
@@ -193,8 +197,10 @@ export class BlockSyncManager {
 		if (affected.size) this.queue(affected, SYNC_DELAY);
 	}
 
+	/** Runs a full pass now, after any pass already running, rather than deferring it. */
 	async synchronizeAll(): Promise<void> {
 		await this.ensureIndex(true);
+		while (this.running) await this.passDone;
 		await this.synchronize(new Set(this.pathsById.keys()));
 	}
 
@@ -300,6 +306,8 @@ export class BlockSyncManager {
 			return;
 		}
 		this.running = true;
+		let finishPass!: () => void;
+		this.passDone = new Promise((resolve) => (finishPass = resolve));
 		try {
 			const scope = await this.expandNestedScope(ids);
 			ids = scope.ids;
@@ -385,6 +393,7 @@ export class BlockSyncManager {
 			);
 		} finally {
 			this.running = false;
+			finishPass();
 			if (this.rerun || this.queuedIds.size) {
 				this.rerun = false;
 				this.queue([], SYNC_DELAY);

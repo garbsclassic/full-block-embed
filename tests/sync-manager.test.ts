@@ -24,6 +24,7 @@ const PLAIN_A = 'intro\nbody\n';
 const BROKEN_B = '<!--#bar+-->\nb\n';
 const FIXED_B = '<!--#bar+-->\nb\n<!--#bar/-->\n';
 const CLEAN_C = '<!--#baz+-->\nc\n<!--#baz/-->\n<!--#baz=-->\nc\n<!--#baz/-->\n';
+const UNSYNCED_A = '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\n<!--#foo/-->\n';
 const A_FOO_ERROR = 'A.md:2: unclosed source block foo (closing marker is missing)';
 const B_BAR_ERROR = 'B.md:1: unclosed source block bar (closing marker is missing)';
 
@@ -37,8 +38,10 @@ function flushEventLoop(): Promise<void> {
 }
 
 // In-memory vault covering the calls a synchronization pass makes: lookup, listing, read, process.
-function createVault(notes: Record<string, string>) {
+function createVault(notes: Record<string, string>, { holdProcess = false } = {}) {
 	const texts = new Map(Object.entries(notes));
+	const heldProcesses: Array<() => void> = [];
+	let holding = holdProcess;
 	const fileAt = (path: string): VaultFile =>
 		Object.assign(new TFile(), {
 			path,
@@ -50,6 +53,8 @@ function createVault(notes: Record<string, string>) {
 		getMarkdownFiles: () => [...texts.keys()].sort().map(fileAt),
 		read: async (file: VaultFile) => texts.get(file.path) ?? '',
 		process: async (file: VaultFile, update: (text: string) => string) => {
+			// A held write keeps its pass running until completeProcess releases it.
+			if (holding) await new Promise<void>((complete) => heldProcesses.push(complete));
 			const next = update(texts.get(file.path) ?? '');
 			texts.set(file.path, next);
 			return next;
@@ -57,6 +62,11 @@ function createVault(notes: Record<string, string>) {
 		// Stands in for saving an edit, so later passes read the new text from the vault.
 		write: (path: string, text: string) => {
 			texts.set(path, text);
+		},
+		heldProcesses,
+		completeProcess: () => {
+			holding = false;
+			for (const complete of heldProcesses) complete();
 		},
 	};
 }
@@ -354,6 +364,69 @@ clockTest('a marker-free observe with no earlier observation clears nothing', as
 	manager.observe(owner, 'Plain.md', BROKEN_A);
 	manager.observe(owner, 'Plain.md', PLAIN_A);
 	assert.deepEqual(clears, [['Plain.md']]);
+});
+
+clockTest('deleting a note clears the issues it reported under its path', async (t) => {
+	const owner = {};
+	const { manager, issues, clears } = createManager({
+		vault: createVault({ 'B.md': BROKEN_B }),
+	});
+	manager.observe(owner, 'B.md', BROKEN_B);
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(issues, [{ 'B.md': [B_BAR_ERROR] }]);
+	// The editor showing the note closes first, so no later pass covers the deleted path.
+	manager.unobserve(owner);
+
+	manager.markDeleted(Object.assign(new TFile(), { path: 'B.md' }));
+
+	assert.deepEqual(clears, [['B.md']]);
+});
+
+clockTest('renaming a note clears the issues under its old path only', async (t) => {
+	const owner = {};
+	const { manager, issues, clears } = createManager({
+		vault: createVault({ 'B.md': BROKEN_B }),
+	});
+	manager.observe(owner, 'B.md', BROKEN_B);
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(issues, [{ 'B.md': [B_BAR_ERROR] }]);
+	manager.unobserve(owner);
+
+	manager.markRenamed(Object.assign(new TFile(), { path: 'Renamed.md' }), 'B.md');
+
+	assert.deepEqual(clears, [['B.md']]);
+});
+
+clockTest('synchronizeAll waits for a running pass, then covers every note', async (t) => {
+	const brokenOwner = {};
+	const syncingOwner = {};
+	const vault = createVault({ 'A.md': UNSYNCED_A, 'B.md': BROKEN_B }, { holdProcess: true });
+	const { manager, issues, clears } = createManager({ vault });
+	manager.observe(brokenOwner, 'B.md', BROKEN_B);
+	await runUntil(t, () => issues.length === 1);
+
+	// A's empty copy takes the source text, so its pass stops at that write until released.
+	manager.observe(syncingOwner, 'A.md', UNSYNCED_A);
+	await runUntil(t, () => vault.heldProcesses.length === 1);
+	vault.write('B.md', FIXED_B);
+
+	let settled = false;
+	const full = manager.synchronizeAll().then(() => {
+		settled = true;
+	});
+	// The index scan yields through the virtual clock once its reads settle, so the timer is
+	// registered only after one flush. A synchronizeAll that does not wait would settle by now.
+	await flushEventLoop();
+	t.mock.timers.runAll();
+	await flushEventLoop();
+	assert.equal(settled, false);
+	assert.deepEqual(clears, [['A.md']]);
+
+	vault.completeProcess();
+	await full;
+
+	assert.deepEqual(issues, [{ 'B.md': [B_BAR_ERROR] }]);
+	assert.deepEqual(clears.map((paths) => [...paths].sort()), [['A.md'], ['A.md', 'B.md']]);
 });
 
 test('a path-prefixed error is filed under its note only', () => {
