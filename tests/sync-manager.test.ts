@@ -30,6 +30,7 @@ const CLEAN_C = '<!--#baz+-->\nc\n<!--#baz/-->\n<!--#baz=-->\nc\n<!--#baz/-->\n'
 const UNSYNCED_A = '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\n<!--#foo/-->\n';
 const A_FOO_ERROR = 'A.md:2: unclosed source block foo (closing marker is missing)';
 const B_BAR_ERROR = 'B.md:1: unclosed source block bar (closing marker is missing)';
+const X_NO_SOURCE_ERROR = 'x: expected exactly one source, found 0';
 const Y_NO_SOURCE_ERROR = 'y: expected exactly one source, found 0';
 
 function storedWith(hashes: Record<string, string>) {
@@ -390,6 +391,36 @@ clockTest('unobserving without a path clears nothing; with the path it clears', 
 	manager.unobserve(editor, 'B.md');
 	assert.deepEqual(sortedKeys(clears), [['B.md', 'block:bar']]);
 	assert.deepEqual(visible.list, [A_FOO_ERROR]);
+});
+
+clockTest("removing a source's last marker re-checks copies; closing a tab does not", async (t) => {
+	const sourceOwner = {};
+	const referenceOwner = {};
+	const A = '<!--#x+-->\nhello\n<!--#x/-->\n';
+	const B = '<!--#x=-->\nhello\n<!--#x/-->\n';
+	const { manager, vault, issues, clears, visible } = createManager({
+		vault: createVault({ 'A.md': A, 'B.md': B }),
+	});
+	manager.observe(referenceOwner, 'B.md', B);
+	manager.observe(sourceOwner, 'A.md', A);
+	await runUntil(t, () => clears.length === 1);
+	assert.deepEqual(visible.list, []);
+
+	// Closing A's tab while its marker stays on disk must not re-check x.
+	manager.unobserve(sourceOwner);
+	t.mock.timers.runAll();
+	await flushEventLoop();
+	assert.deepEqual(issues, []);
+	assert.deepEqual(sortedKeys(clears), [['', 'A.md', 'B.md', 'block:x']]);
+
+	manager.observe(sourceOwner, 'A.md', A);
+	await runUntil(t, () => clears.length === 2);
+
+	// B still shows x, which now has no source, so the pass must report it.
+	vault.write('A.md', 'plain\n');
+	manager.observe(sourceOwner, 'A.md', 'plain\n');
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(visible.list, [X_NO_SOURCE_ERROR]);
 });
 
 clockTest('a marker-free observe with no earlier observation clears nothing', async () => {

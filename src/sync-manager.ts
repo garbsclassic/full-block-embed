@@ -162,6 +162,10 @@ export class BlockSyncManager {
 			window.clearTimeout(this.syncTimer);
 			this.syncTimer = null;
 		}
+		if (observation.path !== markersRemovedFrom) return;
+		// Copies shown elsewhere may have lost their source, so re-check them as an edit would.
+		const affected = intersection(observation.ids, this.activeIds);
+		if (affected.size) this.queue(affected, SYNC_DELAY);
 	}
 
 	markModified(file: TFile): void {

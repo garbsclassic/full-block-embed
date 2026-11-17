@@ -22,6 +22,7 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
   - Block errors (no single source, conflicting or outside edits, nesting cycles) go under `block:<id>`. A pass clears them only for the IDs it reached, so a clean pass for `x` no longer hides a broken `y` in the same notes.
   - An interrupted pass has no scope, so it reports under `''`. Only a clean pass clears that key.
   - When a path or block ID leaves the marker index (note deleted, its last marker removed in an editor or outside Obsidian, or gone after a forced rescan), its issues clear, since no later pass covers it. Closing a tab clears nothing.
+  - When an editor's note loses its last marker, its blocks that are still open elsewhere get a pass, as an edit would. A reference whose source was just removed then shows `x: expected exactly one source, found 0`. Closing a tab queues nothing.
   - Renaming a note moves its issues to the new path and repoints messages that name the old path, so a closed note's issue stays visible.
 - Mobile has no status bar, so it shows one toast when the issue list goes from empty to non-empty, and relies on the **Open first shared block sync issue** command to open it. Desktop shows no toast.
 - **Synchronize shared blocks now** is an explicit action, so it shows `Sync paused: N issues` when issues remain after it runs and nothing otherwise. It waits for a pass that is already running, then runs its own, so the toast reflects the full pass rather than the state before it.
@@ -45,6 +46,7 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
 - [x] Review fix: rename moves a closed note's issues to its new path instead of clearing them
 - [x] Review fix: drop the always-true `livePreview` parameter
 - [x] Review fix: tests for the tab-switch unobserve case and the plugin's visible issue list
+- [x] Re-check open copies when an editor removes a note's last marker
 
 ## Verification
 
@@ -58,6 +60,6 @@ Shared blocks render with Obsidian's own layout in live preview and reading view
 ## Caveats
 
 - Without the right gutter, hover controls overlap the end of a reference's first line in live preview. Removing the hover controls is the follow-up if that bothers in use.
-- Removing a source marker in an editor runs no pass, so a reference elsewhere that lost its source shows no issue until that block syncs again or **Synchronize shared blocks now** runs. This predates the branch.
+- A reference in a closed note that loses its source shows no issue until that note is opened or **Synchronize shared blocks now** runs, because automatic passes cover only blocks open in an editor.
 - A closed note fixed while no shared block is open stays listed until **Synchronize shared blocks now**, because `markModified` only drains dirty paths while blocks are active. This also predates the branch.
 - The tests mirror the plugin's three-line callback wiring into `SyncIssues` rather than exercising `plugin.ts`.
