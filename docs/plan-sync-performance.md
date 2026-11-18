@@ -29,7 +29,7 @@ Out:
 | Edit scope | An in-app edit queues the blocks whose body changed, appeared, or disappeared | Queue every ID in the note | A disappearing block covers a broken marker, so parse errors still surface |
 | Parses per pass | Plan each ID over only the files whose text contains its marker prefix | Thread parse results through `planSync` | A superset filter is a few lines and turns the IDs × files parses into roughly the copy count |
 
-The startup check compares against the time of the last save, so it is a superset: notes changed after that save but before quitting get re-read once. A note copied in with a preserved, older `mtime` is still caught by its `ctime`.
+The saved time (`savedAt`) is when the last completed index check started, with nothing left dirty, not when the data was written. A save before the first check of a session keeps the loaded time, so quitting early can't hide notes changed while Obsidian was closed. Advancing the time doesn't trigger a save on its own, so a stale time only means more notes get re-read once. A note copied in with a preserved, older `mtime` is still caught by its `ctime`.
 
 ## Steps
 
@@ -47,8 +47,8 @@ The startup check compares against the time of the last save, so it is a superse
 
 ### 3. Raise the debounce and persist on change (after 2)
 
-- [ ] `SYNC_DELAY` to 500 ms
-- [ ] Dirty flag in `save`; `setIndexedPath` returns early for an unchanged entry
+- [x] `SYNC_DELAY` to 500 ms
+- [x] Dirty flag in `save`; `setIndexedPath` returns early for an unchanged entry
 - [ ] Check: a pass that changes nothing doesn't call `saveData`
 
 ### 4. Skip rescans of notes open in an editor (after 3)

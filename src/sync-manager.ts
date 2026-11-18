@@ -17,7 +17,7 @@ import { createStoredSyncData, loadSyncState, StoredSyncData } from './sync-stat
 export type { StoredSyncData } from './sync-state';
 
 const INDEX_CHUNK_SIZE = 50;
-const SYNC_DELAY = 100;
+const SYNC_DELAY = 500;
 const MARKER_ID = /<!--#\/?([^\s>]+?)(?=[+=/]|-->|\s)/g;
 
 export interface LiveDocument {
@@ -72,7 +72,9 @@ export class BlockSyncManager {
 	private indexPromise: Promise<void> | null = null;
 	private syncTimer: number | null = null;
 	private dirtyTimer: number | null = null;
-	private lastSaved = '';
+	private unsaved = true;
+	/** Notes changed before this time are in the index; saved as `savedAt`. */
+	private indexedThrough = 0;
 	private saveQueue: Promise<void> = Promise.resolve();
 	private running = false;
 	private passDone: Promise<void> = Promise.resolve();
@@ -106,6 +108,7 @@ export class BlockSyncManager {
 		// closed without retaining or reading every vault note.
 		this.indexValidated = false;
 		this.changedSince = stored.savedAt;
+		this.indexedThrough = stored.savedAt;
 	}
 
 	unload(): void {
@@ -260,12 +263,12 @@ export class BlockSyncManager {
 	}
 
 	async forget(id: string): Promise<void> {
+		const refs = Object.entries(this.knownRefs);
+		const keptRefs = refs.filter(([key]) => key.split('\u0000')[1] !== id);
+		const hadHash = Object.prototype.hasOwnProperty.call(this.hashes, id);
+		if (hadHash || keptRefs.length !== refs.length) this.unsaved = true;
 		delete this.hashes[id];
-		this.knownRefs = Object.fromEntries(
-			Object.entries(this.knownRefs).filter(
-				([key]) => key.split('\u0000')[1] !== id,
-			),
-		);
+		this.knownRefs = Object.fromEntries(keptRefs);
 		this.clearLocalChanges(new Set([id]));
 		await this.persist();
 	}
@@ -387,6 +390,8 @@ export class BlockSyncManager {
 			for (const stage of stages)
 				for (const [path, patches] of stage.patchesByPath)
 					await this.applyFilePatches(path, patches, stage.files);
+			if (!sameEntries(this.hashes, nextHashes) || !sameEntries(this.knownRefs, nextRefs))
+				this.unsaved = true;
 			this.hashes = nextHashes;
 			this.knownRefs = nextRefs;
 			this.clearLocalChanges(ids);
@@ -566,6 +571,7 @@ export class BlockSyncManager {
 	}
 
 	private async drainDirtyPaths(): Promise<void> {
+		const startedAt = Date.now();
 		const paths = [...this.dirtyPaths];
 		for (const path of paths) this.dirtyPaths.delete(path);
 		const affected = new Set<string>();
@@ -578,7 +584,7 @@ export class BlockSyncManager {
 			for (const id of [...before, ...after])
 				if (this.activeIds.has(id)) affected.add(id);
 		}
-		this.indexValidated = this.dirtyPaths.size === 0;
+		this.markValidated(startedAt);
 		await this.persist();
 		if (affected.size) this.queue(affected, 0);
 		else if (this.dirtyPaths.size) this.scheduleDirtyPaths();
@@ -603,12 +609,14 @@ export class BlockSyncManager {
 	}
 
 	private async scanVault(): Promise<void> {
+		const startedAt = Date.now();
 		const previousPaths = [...this.files.keys()];
 		const previousIds = [...this.pathsById.keys()];
 		this.files.clear();
 		this.pathsById.clear();
 		this.sourcePathsById.clear();
 		this.dirtyPaths.clear();
+		this.unsaved = true;
 		this.changedSince = null;
 		const files = this.plugin.app.vault.getMarkdownFiles();
 		for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
@@ -618,10 +626,11 @@ export class BlockSyncManager {
 		}
 		this.clearIssuesLeftIndex(previousPaths, previousIds);
 		this.indexReady = true;
-		this.indexValidated = this.dirtyPaths.size === 0;
+		this.markValidated(startedAt);
 	}
 
 	private async refreshChangedFiles(): Promise<void> {
+		const startedAt = Date.now();
 		const dirty = new Set(this.dirtyPaths);
 		for (const path of dirty) this.dirtyPaths.delete(path);
 		const since = this.changedSince;
@@ -656,7 +665,7 @@ export class BlockSyncManager {
 			await yieldToUi();
 		}
 		this.indexReady = true;
-		this.indexValidated = this.dirtyPaths.size === 0;
+		this.markValidated(startedAt);
 	}
 
 	private async scanFile(file: TFile): Promise<void> {
@@ -706,8 +715,11 @@ export class BlockSyncManager {
 
 	/** Replaces a path's index entry; with no IDs to index, the path leaves the index. */
 	private setIndexedPath(path: string, indexed?: IndexedFile): void {
-		const previousIds = [...(this.files.get(path)?.ids ?? [])];
-		const wasIndexed = this.files.has(path);
+		const previous = this.files.get(path);
+		// Typing re-indexes the note on every keystroke; an unchanged entry needs no rewrite.
+		if (previous && indexed && sameIndexEntry(previous, indexed)) return;
+		const previousIds = [...(previous?.ids ?? [])];
+		const wasIndexed = previous !== undefined;
 		this.removeIndexedPath(path);
 		if (indexed?.ids.size) this.addIndexedPath(path, indexed);
 		if (wasIndexed) this.clearIssuesLeftIndex([path], previousIds);
@@ -723,6 +735,7 @@ export class BlockSyncManager {
 	}
 
 	private addIndexedPath(path: string, indexed: IndexedFile): void {
+		this.unsaved = true;
 		this.files.set(path, indexed);
 		for (const id of indexed.ids) addPath(this.pathsById, id, path);
 		for (const id of indexed.sourceIds)
@@ -732,6 +745,7 @@ export class BlockSyncManager {
 	private removeIndexedPath(path: string): void {
 		const previous = this.files.get(path);
 		if (!previous) return;
+		this.unsaved = true;
 		for (const id of previous.ids) removePath(this.pathsById, id, path);
 		for (const id of previous.sourceIds)
 			removePath(this.sourcePathsById, id, path);
@@ -745,7 +759,7 @@ export class BlockSyncManager {
 				this.localChanges.delete(key);
 	}
 
-	// One save runs at a time, so lastSaved always matches the newest save requested.
+	// One save runs at a time, so a change made during a save is written by the next one.
 	private persist(): Promise<void> {
 		const run = this.saveQueue.then(() => this.save());
 		this.saveQueue = run.catch(() => undefined);
@@ -753,12 +767,48 @@ export class BlockSyncManager {
 	}
 
 	private async save(): Promise<void> {
-		const data = createStoredSyncData(this.hashes, this.knownRefs, this.files, Date.now());
-		const serialized = JSON.stringify({ ...data, savedAt: 0 });
-		if (serialized === this.lastSaved) return;
-		await this.plugin.saveData(data);
-		this.lastSaved = serialized;
+		if (!this.unsaved) return;
+		const data = createStoredSyncData(
+			this.hashes,
+			this.knownRefs,
+			this.files,
+			this.indexedThrough,
+		);
+		this.unsaved = false;
+		try {
+			await this.plugin.saveData(data);
+		} catch (error) {
+			this.unsaved = true;
+			throw error;
+		}
 	}
+
+	/**
+	 * Records that notes changed before `startedAt` are indexed, once nothing is left to check.
+	 * The time is saved but doesn't mark the data unsaved: a stale time only rescans more notes.
+	 */
+	private markValidated(startedAt: number): void {
+		this.indexValidated = this.dirtyPaths.size === 0 && this.changedSince === null;
+		if (this.indexValidated) this.indexedThrough = startedAt;
+	}
+}
+
+function sameIndexEntry(a: IndexedFile, b: IndexedFile): boolean {
+	return (
+		a.mtime === b.mtime &&
+		a.size === b.size &&
+		sameSet(a.ids, b.ids) &&
+		sameSet(a.sourceIds, b.sourceIds)
+	);
+}
+
+function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	return a.size === b.size && [...a].every((value) => b.has(value));
+}
+
+function sameEntries<T>(a: Record<string, T>, b: Record<string, T>): boolean {
+	const keys = Object.keys(a);
+	return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
 }
 
 function groupPatchesByPath(patches: Patch[]): Map<string, Patch[]> {
