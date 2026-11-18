@@ -362,8 +362,10 @@ export class BlockSyncManager {
 				patchesByPath: Map<string, Patch[]>;
 			}> = [];
 			for (const id of order.ids) {
+				// Every note in scope parsed cleanly above, so each ID only needs the notes that
+				// mention it. The prefix test is a superset; planSync ignores the extra blocks.
 				const plan = planSync(
-					scanned,
+					scanned.filter((file) => file.text.includes(`<!--#${id}`)),
 					nextHashes,
 					nextRefs,
 					new Set([id]),
@@ -447,23 +449,18 @@ export class BlockSyncManager {
 	): Promise<{ ids: Set<string>; files: FileText[]; parseErrors: Map<string, string[]> }> {
 		// An ID that left the index has no copies left, so there is nothing to synchronize.
 		const ids = new Set([...requested].filter((id) => this.pathsById.has(id)));
-		const paths = new Set<string>();
+		// Each note is read and parsed once; the guarded write catches a note changed since.
+		const scanned = new Map<string, { file: FileText; blocks: Block[]; errors: string[] }>();
 		let changed = true;
-		let files: FileText[] = [];
-		let parseErrors = new Map<string, string[]>();
 		while (changed) {
 			changed = false;
-			for (const id of ids)
-				for (const path of this.pathsById.get(id) ?? [])
-					if (!paths.has(path)) {
-						paths.add(path);
-						changed = true;
-					}
-			files = await this.readFiles(paths);
-			parseErrors = new Map();
-			for (const file of files) {
-				const { blocks, errors } = parseFile(file.path, file.text);
-				parseErrors.set(file.path, errors);
+			const unread = new Set(
+				[...ids].flatMap((id) => [...(this.pathsById.get(id) ?? [])]),
+			);
+			for (const path of scanned.keys()) unread.delete(path);
+			for (const file of await this.readFiles(unread))
+				scanned.set(file.path, { file, ...parseFile(file.path, file.text) });
+			for (const { blocks } of scanned.values())
 				for (const parent of blocks) {
 					if (!ids.has(parent.id)) continue;
 					for (const child of blocks)
@@ -476,9 +473,13 @@ export class BlockSyncManager {
 							changed = true;
 						}
 				}
-			}
 		}
-		return { ids, files, parseErrors };
+		const entries = [...scanned.values()];
+		return {
+			ids,
+			files: entries.map((entry) => entry.file),
+			parseErrors: new Map(entries.map((entry) => [entry.file.path, entry.errors])),
+		};
 	}
 
 	private async applyFilePatches(

@@ -64,8 +64,8 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 ### 6. Plan each ID over its own files (after 5)
 
-- [ ] Filter `planSync`'s files per ID; `expandNestedScope` reads and parses only new paths
-- [ ] Check: sync-now result unchanged; tests pass
+- [x] Filter `planSync`'s files per ID; `expandNestedScope` reads and parses only new paths
+- [ ] Check: sync-now result unchanged; tests pass. Measured 2026-11-18: planning 100 IDs over 300 notes (one source and two references each) took 157 ms before, 5.7 ms after
 
 ## What this breaks
 
