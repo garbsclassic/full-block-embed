@@ -543,15 +543,16 @@ clockTest('synchronizeAll waits for a running pass, then covers every note', asy
 	const full = manager.synchronizeAll().then(() => {
 		settled = true;
 	});
-	// The index scan yields through the virtual clock once its reads settle, so the timer is
-	// registered only after one flush. A synchronizeAll that does not wait would settle by now.
+	// A synchronizeAll that does not wait for the held pass would settle by now.
 	await flushEventLoop();
 	t.mock.timers.runAll();
 	await flushEventLoop();
 	assert.equal(settled, false);
 	assert.deepEqual(sortedKeys(clears), [['', 'A.md', 'block:foo']]);
 
+	// The rescan starts after the held pass and yields through the virtual clock.
 	vault.completeProcess();
+	await runUntil(t, () => settled);
 	await full;
 
 	assert.deepEqual(issues, [{ 'B.md': [B_BAR_ERROR] }]);
