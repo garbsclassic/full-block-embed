@@ -57,7 +57,7 @@ This plugin adds the following actions to the command palette (`Cmd/Ctrl+P`) and
 | --- | --- |
 | **Create shared block** | Prompts for a block name and wraps the selected text with a source block marker. |
 | **Insert shared block reference** | Lists source blocks and inserts the selected reference block at the cursor, filled with a complete Markdown copy. |
-| **Open shared block source** | Opens the source note with the source block selected. Ctrl/Cmd-clicking a reference block or pressing its arrow button triggers this command. To trigger the command by hotkey or palette, the cursor must be inside the reference block. |
+| **Open shared block source** | Opens the source note with the source block selected. Pressing a reference block's arrow button, or Ctrl/Cmd-clicking it in Reading mode, triggers this command. To trigger the command by hotkey or palette, the cursor must be inside the reference block. |
 | **Delete current shared block reference** | Removes the reference block, including its marker lines and copied Markdown. Pressing the block's trash button triggers this command. To trigger the command by hotkey or palette, the cursor must be inside the reference block. |
 | **Convert current shared source to normal text** | After confirmation, removes related markers from all notes while leaving the copied Markdown in place. Pressing the block's unlink button will trigger this command. To trigger the command by hotkey or palette, the cursor must be inside the source block. |
 | **Open first shared block sync issue** | Opens the first malformed marker or synchronization conflict at its source line. |
@@ -69,13 +69,13 @@ Block rendering and functionality depend on context.
 
 - **Reading mode** — blocks render as normal Markdown.
 
-- **Live Preview mode** — blocks render in the normal live-edit manner but do not show marker lines.
+- **Live Preview mode** — blocks render in the normal live-edit manner, with marker lines shown as comments.
 
 - **Source mode** — all blocks appear in normal source-edit form, including marker lines.
 
-When focused for editing, reference blocks are replaced with an embedded Obsidian editor scoped to the source block. Editing the content of a source or reference block updates all related blocks.
+In Live Preview and Source mode, a reference block's copied Markdown is edited in place like any other text. Editing the content of a source or reference block updates all related blocks.
 
-All blocks highlight on hover. Reference blocks also reveal buttons to open the source or delete the reference. Source blocks reveal a button to convert it and all references to normal text.
+All blocks highlight on hover. Reference blocks also reveal buttons to open the source, convert the reference to normal text, or delete the reference; Reading mode offers only open and delete. Source blocks reveal a button to convert it and all references to normal text.
 
 ### Block Structure
 

@@ -488,7 +488,7 @@ export class BlockSyncManager {
 		const live = this.liveDocuments(path);
 		if (live.length) {
 			// A file can be represented by more than one open editor (for example,
-			// a normal source note and an embedded reference editor). Validate all
+			// the same note open in two panes). Validate all
 			// buffers before changing any of them, then keep every matching buffer
 			// together so an older view cannot later overwrite the synchronized one.
 			const texts = live.map((document) => document.read());

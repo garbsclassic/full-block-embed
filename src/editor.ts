@@ -1,6 +1,4 @@
 import {
-	Facet,
-	StateEffect,
 	StateField,
 	type EditorState,
 	type Extension,
@@ -14,20 +12,13 @@ import {
 	ViewPlugin,
 	WidgetType,
 } from '@codemirror/view';
-import { editorInfoField, editorLivePreviewField } from 'obsidian';
+import { editorInfoField } from 'obsidian';
 import { applyPatches, Block, parseFile, type Patch } from './blocks';
-import {
-	EmbeddedBlockEditor,
-	type EmbeddedEditorHost,
-} from './embedded-editor';
 import { addIconButton } from './ui';
 
-const embeddedEditor = Facet.define<boolean, boolean>({
-	combine: (values) => values.some(Boolean),
-});
-
-export interface EditingActions extends EmbeddedEditorHost {
+export interface EditingActions {
 	openSource: (id: string) => void;
+	decoupleReference: (view: CodeMirrorEditorView, block: Block) => void;
 	removeReference: (view: CodeMirrorEditorView, block: Block) => void;
 	convertSource: (view: CodeMirrorEditorView, block: Block) => void;
 	observeEditor: (
@@ -41,72 +32,6 @@ export interface EditingActions extends EmbeddedEditorHost {
 		editedInObsidian: boolean,
 	) => void;
 	unobserveEditor: (owner: object, markersRemovedFrom?: string) => void;
-}
-
-const referenceEditors = new WeakMap<HTMLElement, EmbeddedBlockEditor>();
-
-class ReferenceEditorWidget extends WidgetType {
-	constructor(
-		private block: Block,
-		private actions: EditingActions,
-	) {
-		super();
-	}
-
-	eq(other: ReferenceEditorWidget): boolean {
-		return (
-			other.block.id === this.block.id &&
-			other.block.path === this.block.path &&
-			other.block.start === this.block.start &&
-			other.block.body === this.block.body
-		);
-	}
-
-	toDOM(view: CodeMirrorEditorView): HTMLElement {
-		const host = createDiv({ cls: 'full-block-embed-reference' });
-		host.dataset.sharedBlockId = this.block.id;
-		const controls = host.createDiv({
-			cls: 'full-block-embed-reading-controls',
-		});
-		addIconButton(controls, {
-			icon: 'arrow-up-right',
-			title: `Open source: ${this.block.id}`,
-			run: () => this.actions.openSource(this.block.id),
-		});
-		addIconButton(controls, {
-			icon: 'trash-2',
-			title: `Delete reference: ${this.block.id}`,
-			run: () => this.actions.removeReference(view, this.block),
-		});
-		host.addEventListener('mousedown', (event) => {
-			if (!(event.ctrlKey || event.metaKey)) return;
-			event.preventDefault();
-			event.stopPropagation();
-			this.actions.openSource(this.block.id);
-		});
-		const component = new EmbeddedBlockEditor(
-			host.createDiv({ cls: 'full-block-embed-editor' }),
-			this.actions,
-			this.block,
-			() => view.requestMeasure(),
-		);
-		referenceEditors.set(host, component);
-		component.load();
-		return host;
-	}
-
-	destroy(dom: HTMLElement): void {
-		referenceEditors.get(dom)?.unload();
-		referenceEditors.delete(dom);
-	}
-
-	updateDOM(dom: HTMLElement): boolean {
-		return referenceEditors.get(dom)?.update(this.block) ?? false;
-	}
-
-	ignoreEvent(): boolean {
-		return true;
-	}
 }
 
 class BlockControlsWidget extends WidgetType {
@@ -134,6 +59,11 @@ class BlockControlsWidget extends WidgetType {
 				run: () => this.actions.openSource(this.block.id),
 			});
 			addIconButton(controls, {
+				icon: 'unlink',
+				title: `Convert reference to normal text: ${this.block.id}`,
+				run: () => this.actions.decoupleReference(view, this.block),
+			});
+			addIconButton(controls, {
 				icon: 'trash-2',
 				title: `Delete reference: ${this.block.id}`,
 				run: () => this.actions.removeReference(view, this.block),
@@ -153,34 +83,12 @@ function decorations(
 	state: EditorState,
 	actions: EditingActions,
 ): DecorationSet {
-	if (state.facet(embeddedEditor)) return Decoration.none;
 	const ranges: Array<Range<Decoration>> = [];
 	const text = state.doc.toString();
 	if (!text.includes('<!--#')) return Decoration.none;
 	const path = state.field(editorInfoField, false)?.file?.path || '';
-	const livePreview = state.field(editorLivePreviewField, false) ?? false;
 	const blocks = parseFile(path, text).blocks;
 	for (const block of blocks) {
-		if (block.kind === '=' && livePreview) {
-			// The outer widget renders its complete Markdown body. Decorating a
-			// nested reference as well would create overlapping atomic ranges.
-			if (
-				blocks.some(
-					(parent) =>
-						parent.kind === '=' &&
-						parent.start < block.start &&
-						parent.end > block.end,
-				)
-			)
-				continue;
-			ranges.push(
-				Decoration.replace({
-					block: true,
-					widget: new ReferenceEditorWidget(block, actions),
-				}).range(block.start, block.end),
-			);
-			continue;
-		}
 		const first = state.doc.lineAt(
 			Math.min(block.bodyStart, state.doc.length),
 		);
@@ -266,24 +174,11 @@ export function editingExtension(actions: EditingActions): Extension {
 	const field = StateField.define<DecorationSet>({
 		create: (state) => decorations(state, actions),
 		update: (current, transaction) => {
-			const oldEmbedded = transaction.startState.facet(embeddedEditor);
-			const isEmbedded = transaction.state.facet(embeddedEditor);
-			const oldLivePreview = transaction.startState.field(
-				editorLivePreviewField,
-				false,
-			);
-			const livePreview = transaction.state.field(
-				editorLivePreviewField,
-				false,
-			);
 			const oldPath = transaction.startState.field(editorInfoField, false)
 				?.file?.path;
 			const path = transaction.state.field(editorInfoField, false)?.file
 				?.path;
-			return transaction.docChanged ||
-				oldEmbedded !== isEmbedded ||
-				oldLivePreview !== livePreview ||
-				oldPath !== path
+			return transaction.docChanged || oldPath !== path
 				? decorations(transaction.state, actions)
 				: current;
 		},
@@ -293,92 +188,5 @@ export function editingExtension(actions: EditingActions): Extension {
 		observer,
 		field,
 		CodeMirrorEditorView.atomicRanges.of((view) => view.state.field(field)),
-	];
-}
-
-export function viewportExtension(
-	path: string,
-	id: string,
-	contentChanged: () => void,
-): Extension {
-	const focusChanged = StateEffect.define<boolean>();
-	interface ViewportState {
-		decorations: DecorationSet;
-		focused: boolean;
-	}
-	const getDecorations = (text: string, focused: boolean): DecorationSet => {
-		const block = parseFile(path, text).blocks.find(
-			(candidate) => candidate.id === id && candidate.kind === '+',
-		);
-		if (!block) return Decoration.none;
-		const ranges: Array<Range<Decoration>> = [];
-		if (block.start > 0)
-			ranges.push(
-				Decoration.replace({ block: true }).range(0, block.start),
-			);
-		if (block.end < text.length)
-			ranges.push(
-				Decoration.replace({ block: true }).range(
-					block.end,
-					text.length,
-				),
-			);
-		if (!focused) {
-			const body = text.slice(block.bodyStart, block.bodyEnd);
-			for (const match of body.matchAll(/%%[\s\S]*?%%/g)) {
-				const from = block.bodyStart + (match.index ?? 0);
-				ranges.push(
-					Decoration.replace({}).range(from, from + match[0].length),
-				);
-			}
-		}
-		return Decoration.set(ranges, true);
-	};
-	const field = StateField.define<ViewportState>({
-		create: (state) => ({
-			decorations: getDecorations(state.doc.toString(), false),
-			focused: false,
-		}),
-		update: (current, transaction) => {
-			let focused = current.focused;
-			for (const effect of transaction.effects)
-				if (effect.is(focusChanged)) focused = effect.value;
-			return transaction.docChanged || focused !== current.focused
-				? {
-						decorations: getDecorations(
-							transaction.state.doc.toString(),
-							focused,
-						),
-						focused,
-					}
-				: current;
-		},
-		provide: (value) =>
-			CodeMirrorEditorView.decorations.from(
-				value,
-				(state) => state.decorations,
-			),
-	});
-	return [
-		embeddedEditor.of(true),
-		field,
-		CodeMirrorEditorView.atomicRanges.of(
-			(view) => view.state.field(field).decorations,
-		),
-		CodeMirrorEditorView.domEventHandlers({
-			focus: (_event, view) => {
-				view.dispatch({ effects: focusChanged.of(true) });
-			},
-			blur: (_event, view) => {
-				view.dispatch({ effects: focusChanged.of(false) });
-			},
-		}),
-		CodeMirrorEditorView.updateListener.of((update) => {
-			if (update.docChanged || update.geometryChanged)
-				window.requestAnimationFrame(contentChanged);
-		}),
-		CodeMirrorEditorView.contentAttributes.of({
-			'aria-label': `Shared block ${id}`,
-		}),
 	];
 }

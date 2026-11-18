@@ -7,6 +7,8 @@
 - Show one toast per pause on mobile, and a toast after **Synchronize shared blocks now** when issues remain
 - Remove the success toasts for deleting a reference and converting a source to normal text
 - Stop rewriting `data.json` when the synchronization data has not changed
+- Edit references in place in Live Preview, as in Source mode, replacing the embedded source editor
+- Add a button that converts a single reference to normal text
 
 ## 1.0.3
 

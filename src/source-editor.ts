@@ -1,15 +1,5 @@
-import { StateEffect } from '@codemirror/state';
-import { EditorView as CodeMirrorEditorView } from '@codemirror/view';
-import {
-	App,
-	Editor,
-	MarkdownView,
-	Notice,
-	TFile,
-	WorkspaceLeaf,
-} from 'obsidian';
-import { Block, parseFile } from './blocks';
-import { viewportExtension } from './editor';
+import { App, MarkdownView, Notice, TFile } from 'obsidian';
+import { Block } from './blocks';
 
 export interface LocatedSource {
 	block: Block;
@@ -21,72 +11,6 @@ export class SourceEditor {
 		private app: App,
 		private findSource: (id: string) => Promise<LocatedSource | null>,
 	) {}
-
-	async mount(
-		container: HTMLElement,
-		id: string,
-		contentChanged: () => void,
-	): Promise<WorkspaceLeaf | null> {
-		const source = await this.findSource(id);
-		if (!source) {
-			container.empty();
-			container.createDiv({
-				cls: 'full-block-embed-error',
-				text: `Source not found for ${id}`,
-			});
-			return null;
-		}
-		container.empty();
-		const loading = container.createDiv({
-			cls: 'full-block-embed-loading',
-			text: `Loading ${id}…`,
-		});
-		// Obsidian uses this constructor for embedded views but omits it from the
-		// public TypeScript declaration.
-		const EmbeddedLeaf = WorkspaceLeaf as unknown as new (
-			app: App,
-		) => WorkspaceLeaf;
-		const leaf = new EmbeddedLeaf(this.app);
-		try {
-			await leaf.openFile(source.file, {
-				state: { mode: 'source', source: false },
-			});
-			const view = leaf.view;
-			if (!(view instanceof MarkdownView))
-				throw new Error('Obsidian did not create a Markdown editor');
-			const editor = view.editor as Editor & {
-				cm?: CodeMirrorEditorView;
-			};
-			if (!editor.cm) throw new Error('Obsidian editor is not ready');
-			editor.cm.dispatch({
-				effects: StateEffect.appendConfig.of(
-					viewportExtension(source.file.path, id, contentChanged),
-				),
-			});
-			const editorEl = editor.cm.dom.closest<HTMLElement>(
-				'.markdown-source-view',
-			);
-			if (!editorEl)
-				throw new Error('Obsidian editor container is not ready');
-			editorEl.addClass('full-block-embed-embedded-view');
-			loading.remove();
-			container.appendChild(editorEl);
-			window.requestAnimationFrame(() => {
-				const latest = parseFile(
-					source.file.path,
-					view.editor.getValue(),
-				).blocks.find((block) => block.id === id && block.kind === '+');
-				if (!latest) return;
-				view.editor.setCursor({ line: latest.startLine + 1, ch: 0 });
-				editor.cm?.focus();
-				editor.cm?.requestMeasure();
-			});
-			return leaf;
-		} catch (error) {
-			leaf.detach();
-			throw error;
-		}
-	}
 
 	async open(id: string): Promise<void> {
 		const source = await this.findSource(id);

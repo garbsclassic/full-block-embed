@@ -1,9 +1,7 @@
 import { EditorView as CodeMirrorEditorView } from '@codemirror/view';
 import {
-	Component,
 	Editor,
 	MarkdownView,
-	MarkdownRenderer,
 	Menu,
 	Notice,
 	Platform,
@@ -73,11 +71,9 @@ export default class FullBlockEmbed extends Plugin {
 			}),
 		);
 		const editingActions: EditingActions = {
-			renderPreview: (container, block, owner) =>
-				this.renderPreview(container, block, owner),
-			mountLiveEditor: (container, id, contentChanged) =>
-				this.sourceEditor.mount(container, id, contentChanged),
 			openSource: (id) => void this.sourceEditor.open(id),
+			decoupleReference: (view, block) =>
+				this.decoupleReferenceInEditor(view, block),
 			removeReference: (view, block) =>
 				this.removeReferenceInEditor(view, block),
 			convertSource: (view, block) =>
@@ -290,21 +286,6 @@ export default class FullBlockEmbed extends Plugin {
 		}
 	}
 
-	private async renderPreview(
-		container: HTMLElement,
-		block: Block,
-		owner: Component,
-	): Promise<void> {
-		container.empty();
-		container.addClass('full-block-embed-live-preview');
-		await MarkdownRenderer.render(
-			this.app,
-			block.body,
-			container,
-			block.path,
-			owner,
-		);
-	}
 	private blockAtCursor(
 		editor: Editor,
 		file: TFile | null,
@@ -335,21 +316,43 @@ export default class FullBlockEmbed extends Plugin {
 		view: CodeMirrorEditorView,
 		block: Block,
 	): void {
-		if (block.kind !== '=') return;
-		const current = view.state.doc.toString();
-		const latest = parseFile(block.path, current).blocks.find(
+		const latest = this.latestReference(view, block, 'delete');
+		if (!latest) return;
+		view.dispatch({
+			changes: { from: latest.start, to: latest.end, insert: '' },
+		});
+	}
+	/** Removes one reference's marker lines, leaving its Markdown as normal text. */
+	private decoupleReferenceInEditor(
+		view: CodeMirrorEditorView,
+		block: Block,
+	): void {
+		const latest = this.latestReference(view, block, 'convert');
+		if (!latest) return;
+		view.dispatch({
+			changes: {
+				from: latest.start,
+				to: latest.end,
+				insert: view.state.sliceDoc(latest.bodyStart, latest.bodyEnd),
+			},
+		});
+	}
+	/** Finds `block` again in the editor's current text, since a button can outlive an edit. */
+	private latestReference(
+		view: CodeMirrorEditorView,
+		block: Block,
+		button: string,
+	): Block | undefined {
+		if (block.kind !== '=') return undefined;
+		const latest = parseFile(block.path, view.state.doc.toString()).blocks.find(
 			(candidate) =>
 				candidate.kind === '=' &&
 				candidate.id === block.id &&
 				candidate.start === block.start,
 		);
-		if (!latest) {
-			new Notice('This reference changed; try the delete button again');
-			return;
-		}
-		view.dispatch({
-			changes: { from: latest.start, to: latest.end, insert: '' },
-		});
+		if (!latest)
+			new Notice(`This reference changed; try the ${button} button again`);
+		return latest;
 	}
 	private async removeReferenceFromFile(
 		path: string,
