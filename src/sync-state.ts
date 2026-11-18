@@ -1,5 +1,3 @@
-import { contentFingerprint, normalize } from './blocks';
-
 export interface StoredFileIndex {
 	mtime: number;
 	size: number;
@@ -7,21 +5,11 @@ export interface StoredFileIndex {
 	sourceIds: string[];
 }
 
-export interface StoredSyncDataV3 {
+export interface StoredSyncData {
 	version: 3;
 	hashes: Record<string, string>;
 	knownRefs: Record<string, boolean>;
-	sourcePaths: Record<string, string>;
 	files: Record<string, StoredFileIndex>;
-}
-
-export interface LegacyStoredSyncData {
-	version?: number;
-	hashes?: Record<string, string>;
-	revisions?: Record<string, string>;
-	knownRefs?: Record<string, boolean>;
-	sourcePaths?: Record<string, string>;
-	files?: Record<string, StoredFileIndex>;
 }
 
 export interface IndexedFileMetadata {
@@ -34,52 +22,35 @@ export interface IndexedFileMetadata {
 export interface LoadedSyncState {
 	hashes: Record<string, string>;
 	knownRefs: Record<string, boolean>;
-	sourcePaths: Record<string, string>;
 	files?: Record<string, StoredFileIndex>;
 }
 
-export function loadSyncState(
-	raw: LegacyStoredSyncData | null,
-): LoadedSyncState {
+const FINGERPRINT = /^v1:\d+:[0-9a-f]{32}$/;
+
+/** Plugin data can be edited by hand, so every value is checked before use. */
+export function loadSyncState(raw: Partial<StoredSyncData> | null): LoadedSyncState {
 	const stored = raw ?? {};
-	const baselines = stored.hashes ?? stored.revisions ?? {};
 	const hashes = Object.fromEntries(
-		Object.entries(baselines).flatMap(([id, value]) =>
-			typeof value !== 'string'
-				? []
-				: [
-						[
-							id,
-							/^v1:\d+:[0-9a-f]{32}$/.test(value)
-								? value
-								: contentFingerprint(normalize(value)),
-						],
-					],
+		Object.entries(stored.hashes ?? {}).filter(
+			([, value]) => typeof value === 'string' && FINGERPRINT.test(value),
 		),
 	);
 	const files =
 		stored.version === 3 && stored.files
 			? Object.fromEntries(
 					Object.entries(stored.files).filter(
-						([, entry]) =>
-							validStoredFile(entry) && entry.ids.length > 0,
+						([, entry]) => validStoredFile(entry) && entry.ids.length > 0,
 					),
 				)
 			: undefined;
-	return {
-		hashes,
-		knownRefs: { ...(stored.knownRefs ?? {}) },
-		sourcePaths: { ...(stored.sourcePaths ?? {}) },
-		files,
-	};
+	return { hashes, knownRefs: { ...(stored.knownRefs ?? {}) }, files };
 }
 
 export function createStoredSyncData(
 	hashes: Record<string, string>,
 	knownRefs: Record<string, boolean>,
-	sourcePaths: Record<string, string>,
 	indexedFiles: ReadonlyMap<string, IndexedFileMetadata>,
-): StoredSyncDataV3 {
+): StoredSyncData {
 	const files: Record<string, StoredFileIndex> = {};
 	for (const [path, indexed] of indexedFiles) {
 		if (!indexed.ids.size) continue;
@@ -90,13 +61,7 @@ export function createStoredSyncData(
 			sourceIds: [...indexed.sourceIds].sort(),
 		};
 	}
-	return {
-		version: 3,
-		hashes,
-		knownRefs,
-		sourcePaths,
-		files,
-	};
+	return { version: 3, hashes, knownRefs, files };
 }
 
 function validStoredFile(value: StoredFileIndex): boolean {

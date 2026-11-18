@@ -39,7 +39,7 @@ const N_NO_SOURCE_ERROR = 'n: expected exactly one source, found 0';
 const CYCLE_A_ERROR = 'a: circular nested shared blocks (a -> b -> a)';
 
 function storedWith(hashes: Record<string, string>) {
-	return { version: 3, hashes, knownRefs: {}, sourcePaths: {}, files: {} };
+	return { version: 3, hashes, knownRefs: {}, files: {} };
 }
 
 // setImmediate runs after every pending microtask, so queued work reaches its next await.

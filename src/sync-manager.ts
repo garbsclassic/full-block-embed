@@ -12,13 +12,9 @@ import {
 } from './blocks';
 import { nestedSyncOrder, rebaseContainingFingerprints } from './nesting';
 import { blockIssueKey, INTERRUPTED_ISSUE_KEY } from './sync-issues';
-import {
-	createStoredSyncData,
-	LegacyStoredSyncData,
-	loadSyncState,
-} from './sync-state';
+import { createStoredSyncData, loadSyncState, StoredSyncData } from './sync-state';
 
-export type { LegacyStoredSyncData } from './sync-state';
+export type { StoredSyncData } from './sync-state';
 
 const INDEX_CHUNK_SIZE = 50;
 const SYNC_DELAY = 100;
@@ -63,7 +59,6 @@ class ConcurrentEditError extends Error {}
 export class BlockSyncManager {
 	private hashes: Record<string, string> = {};
 	private knownRefs: Record<string, boolean> = {};
-	private savedSourcePaths: Record<string, string> = {};
 	private observations = new Map<object, Observation>();
 	private activeIds = new Set<string>();
 	private files = new Map<string, IndexedFile>();
@@ -89,11 +84,10 @@ export class BlockSyncManager {
 		private callbacks: SyncManagerCallbacks,
 	) {}
 
-	load(raw: LegacyStoredSyncData | null): void {
+	load(raw: Partial<StoredSyncData> | null): void {
 		const stored = loadSyncState(raw);
 		this.hashes = stored.hashes;
 		this.knownRefs = stored.knownRefs;
-		this.savedSourcePaths = stored.sourcePaths;
 
 		if (!stored.files) return;
 		for (const [path, entry] of Object.entries(stored.files))
@@ -172,9 +166,9 @@ export class BlockSyncManager {
 	}
 
 	markModified(file: TFile): void {
-		// A legacy cache has no structural index yet; its eventual first scan will
-		// include this change. Once an index exists, events let an unindexed note
-		// gain its first block without retaining every empty note in plugin data.
+		// Without a stored index, the eventual first scan includes this change. Once an index
+		// exists, events let an unindexed note gain its first block without retaining every
+		// empty note in plugin data.
 		if (!this.indexReady && !this.indexPromise) return;
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
@@ -200,8 +194,6 @@ export class BlockSyncManager {
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		for (const [id, path] of Object.entries(this.savedSourcePaths))
-			if (path === oldPath) this.savedSourcePaths[id] = file.path;
 		if (this.activeIds.size) this.scheduleDirtyPaths();
 		const affected = intersection(previous, this.activeIds);
 		if (affected.size) this.queue(affected, SYNC_DELAY);
@@ -231,12 +223,7 @@ export class BlockSyncManager {
 		await this.ensureIndex();
 		const paths = this.sourcePathsById.get(id);
 		if (!paths || paths.size !== 1) return null;
-		const located = await this.readSource([...paths][0]!, id);
-		if (!located) {
-			delete this.savedSourcePaths[id];
-			return null;
-		}
-		return located;
+		return this.readSource([...paths][0]!, id);
 	}
 
 	async filesForId(id: string): Promise<FileText[]> {
@@ -270,7 +257,6 @@ export class BlockSyncManager {
 
 	async forget(id: string): Promise<void> {
 		delete this.hashes[id];
-		delete this.savedSourcePaths[id];
 		this.knownRefs = Object.fromEntries(
 			Object.entries(this.knownRefs).filter(
 				([key]) => key.split('\u0000')[1] !== id,
@@ -400,7 +386,6 @@ export class BlockSyncManager {
 			this.hashes = nextHashes;
 			this.knownRefs = nextRefs;
 			this.clearLocalChanges(ids);
-			this.refreshSavedSourcePaths(ids);
 			const changedPaths = new Set(
 				stages.flatMap((stage) => [...stage.patchesByPath.keys()]),
 			);
@@ -590,7 +575,6 @@ export class BlockSyncManager {
 				if (this.activeIds.has(id)) affected.add(id);
 		}
 		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
 		await this.persist();
 		if (affected.size) this.queue(affected, 0);
 		else if (this.dirtyPaths.size) this.scheduleDirtyPaths();
@@ -630,7 +614,6 @@ export class BlockSyncManager {
 		this.clearIssuesLeftIndex(previousPaths, previousIds);
 		this.indexReady = true;
 		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
 	}
 
 	private async refreshChangedFiles(): Promise<void> {
@@ -659,7 +642,6 @@ export class BlockSyncManager {
 		}
 		this.indexReady = true;
 		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
 	}
 
 	private async scanFile(file: TFile): Promise<void> {
@@ -741,22 +723,6 @@ export class BlockSyncManager {
 		this.files.delete(path);
 	}
 
-	private refreshSavedSourcePaths(ids: Iterable<string>): void {
-		for (const id of ids) {
-			const paths = this.sourcePathsById.get(id);
-			if (paths?.size === 1) this.savedSourcePaths[id] = [...paths][0]!;
-			else delete this.savedSourcePaths[id];
-		}
-	}
-
-	private refreshAllSavedSourcePaths(): void {
-		this.refreshSavedSourcePaths(
-			new Set([
-				...this.sourcePathsById.keys(),
-				...Object.keys(this.savedSourcePaths),
-			]),
-		);
-	}
 
 	private clearLocalChanges(ids: ReadonlySet<string>): void {
 		for (const key of this.localChanges)
@@ -775,7 +741,6 @@ export class BlockSyncManager {
 		const data = createStoredSyncData(
 			this.hashes,
 			this.knownRefs,
-			this.savedSourcePaths,
 			this.files,
 		);
 		const serialized = JSON.stringify(data);

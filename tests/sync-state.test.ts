@@ -14,7 +14,6 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 	const stored = createStoredSyncData(
 		{ example: hash },
 		{ 'Reference.md\u0000example\u00000': true },
-		{ example: 'Source.md' },
 		new Map([
 			[
 				'Source.md',
@@ -50,18 +49,16 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 	assert.deepEqual(loadSyncState(stored), {
 		hashes: { example: hash },
 		knownRefs: { 'Reference.md\u0000example\u00000': true },
-		sourcePaths: { example: 'Source.md' },
 		files: stored.files,
 	});
 });
 
-test('legacy full-content baselines migrate to hashes without a startup index', () => {
+test('loading drops baselines that are not fingerprints and indexes without a version', () => {
+	const hash = contentFingerprint('Kept');
 	const loaded = loadSyncState({
-		revisions: { example: 'Legacy private body' },
+		hashes: { kept: hash, raw: 'Private body', wrong: 42 as unknown as string },
+		files: {},
 	});
-	assert.equal(
-		loaded.hashes.example,
-		contentFingerprint('Legacy private body'),
-	);
+	assert.deepEqual(loaded.hashes, { kept: hash });
 	assert.equal(loaded.files, undefined);
 });
