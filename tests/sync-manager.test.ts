@@ -62,17 +62,27 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 	const texts = new Map(Object.entries(notes));
 	const heldProcesses: Array<() => void> = [];
 	const processFailures: Error[] = [];
+	const stats = new Map<string, { mtime: number; ctime: number }>();
+	// Every path the manager reads from the vault, in order, so tests can show a note was skipped.
+	const reads: string[] = [];
 	let holding = holdProcess;
 	const fileAt = (path: string): VaultFile =>
 		Object.assign(new TFile(), {
 			path,
 			extension: 'md',
-			stat: { mtime: 0, size: texts.get(path)?.length ?? 0 },
+			stat: {
+				mtime: stats.get(path)?.mtime ?? 0,
+				ctime: stats.get(path)?.ctime ?? 0,
+				size: texts.get(path)?.length ?? 0,
+			},
 		});
 	return {
 		getAbstractFileByPath: (path: string) => (texts.has(path) ? fileAt(path) : null),
 		getMarkdownFiles: () => [...texts.keys()].sort().map(fileAt),
-		read: async (file: VaultFile) => texts.get(file.path) ?? '',
+		read: async (file: VaultFile) => {
+			reads.push(file.path);
+			return texts.get(file.path) ?? '';
+		},
 		process: async (file: VaultFile, update: (text: string) => string) => {
 			// A held write keeps its pass running until completeProcess releases it.
 			if (holding) await new Promise<void>((complete) => heldProcesses.push(complete));
@@ -86,6 +96,12 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 		write: (path: string, text: string) => {
 			texts.set(path, text);
 		},
+		// Sets the stat a note reports, as when it was edited or copied in while Obsidian was closed.
+		setStat: (path: string, mtime: number, ctime: number) => {
+			stats.set(path, { mtime, ctime });
+		},
+		text: (path: string) => texts.get(path),
+		reads,
 		// Stands in for a note deleted or renamed away, so a later full scan no longer finds it.
 		remove: (path: string) => {
 			texts.delete(path);
@@ -104,6 +120,8 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 
 function createManager({ holdSaves = false, vault = createVault({}) } = {}) {
 	const saveCalls: unknown[] = [];
+	// Unlike `saveCalls`, these keep the save time, for tests that assert it.
+	const savedData: Array<Record<string, unknown>> = [];
 	const failures: Error[] = [];
 	const heldSaves: Array<() => void> = [];
 	// Each report is the callback's Map as a plain object, so assertions compare literal values.
@@ -118,6 +136,7 @@ function createManager({ holdSaves = false, vault = createVault({}) } = {}) {
 			// Snapshot the payload as Obsidian would persist it, since the manager keeps
 			// mutating the maps it passed in. The save time differs per run, so it's dropped.
 			const snapshot = structuredClone(data) as Record<string, unknown>;
+			savedData.push(structuredClone(snapshot));
 			delete snapshot.savedAt;
 			saveCalls.push(snapshot);
 			if (holdSaves)
@@ -145,6 +164,7 @@ function createManager({ holdSaves = false, vault = createVault({}) } = {}) {
 		manager,
 		vault,
 		saveCalls,
+		savedData,
 		issues,
 		clears,
 		renames,
@@ -820,4 +840,309 @@ clockTest('a failed pass does not report an ID that left the index meanwhile', a
 	completeSave();
 	await runUntil(t, () => issues.length === 2);
 	assert.deepEqual(visible.list, []);
+});
+
+// Settles a manager call that waits on the virtual clock, such as the index scan's yield.
+async function settleOnClock<T>(t: TestContext, promise: Promise<T>): Promise<T> {
+	let settled = false;
+	const result = promise.then((value) => {
+		settled = true;
+		return value;
+	});
+	await runUntil(t, () => settled);
+	return result;
+}
+
+const SAVED_AT = 1000;
+const INDEXED_SOURCE = '<!--#i+-->\ni\n<!--#i/-->\n';
+const EMPTY_X_REFERENCE = '<!--#x=-->\n<!--#x/-->\n';
+const FILLED_X_REFERENCE = '<!--#x=-->\nx\n<!--#x/-->\n';
+
+function storedIndex(
+	files: Record<string, { text: string; mtime: number; ids: string[]; sourceIds: string[] }>,
+	savedAt = SAVED_AT,
+) {
+	return {
+		version: 3,
+		hashes: {},
+		knownRefs: {},
+		savedAt,
+		files: Object.fromEntries(
+			Object.entries(files).map(([path, { text, ...entry }]) => [
+				path,
+				{ ...entry, size: text.length },
+			]),
+		),
+	};
+}
+
+clockTest('first index check indexes unindexed notes whose mtime or ctime is after the save', async (t) => {
+	const newerEdit = '<!--#m+-->\nm\n<!--#m/-->\n';
+	const newerCopy = '<!--#c+-->\nc\n<!--#c/-->\n';
+	const older = '<!--#o+-->\no\n<!--#o/-->\n';
+	const vault = createVault({
+		'Indexed.md': INDEXED_SOURCE,
+		'NewerCopy.md': newerCopy,
+		'NewerEdit.md': newerEdit,
+		'Older.md': older,
+	});
+	vault.setStat('Indexed.md', 10, 10);
+	vault.setStat('NewerEdit.md', 2000, 100);
+	// A copied-in note keeps an old mtime; only its ctime is new.
+	vault.setStat('NewerCopy.md', 500, 3000);
+	// Exactly the save time is not newer.
+	vault.setStat('Older.md', SAVED_AT, SAVED_AT);
+	const { manager } = createManager({ vault });
+	manager.load(
+		storedIndex({
+			'Indexed.md': { text: INDEXED_SOURCE, mtime: 10, ids: ['i'], sourceIds: ['i'] },
+		}),
+	);
+
+	const edited = await settleOnClock(t, manager.filesForId('m'));
+
+	assert.deepEqual(edited, [{ path: 'NewerEdit.md', text: newerEdit }]);
+	assert.deepEqual(await manager.filesForId('c'), [{ path: 'NewerCopy.md', text: newerCopy }]);
+	assert.deepEqual(await manager.filesForId('o'), []);
+	assert.equal(vault.reads.includes('Older.md'), false);
+});
+
+clockTest('observing a block syncs a note changed while closed but not an older one', async (t) => {
+	const owner = {};
+	const vault = createVault({
+		'NewerCopy.md': EMPTY_X_REFERENCE,
+		'NewerEdit.md': EMPTY_X_REFERENCE,
+		'Older.md': EMPTY_X_REFERENCE,
+		'S.md': X_SOURCE,
+	});
+	vault.setStat('S.md', 10, 10);
+	vault.setStat('NewerEdit.md', 2000, 100);
+	vault.setStat('NewerCopy.md', 500, 3000);
+	vault.setStat('Older.md', 900, 900);
+	const { manager, clears } = createManager({ vault });
+	manager.load(
+		storedIndex({ 'S.md': { text: X_SOURCE, mtime: 10, ids: ['x'], sourceIds: ['x'] } }),
+	);
+
+	manager.observe(owner, 'S.md', X_SOURCE);
+	await runUntil(t, () => clears.length === 1);
+
+	assert.equal(vault.text('NewerEdit.md'), FILLED_X_REFERENCE);
+	assert.equal(vault.text('NewerCopy.md'), FILLED_X_REFERENCE);
+	assert.equal(vault.text('Older.md'), EMPTY_X_REFERENCE);
+	assert.equal(vault.reads.includes('Older.md'), false);
+});
+
+clockTest('a save before the first index check keeps the loaded save time', async () => {
+	const { manager, savedData } = createManager();
+	manager.load({ ...storedWith({ example: FINGERPRINT }), savedAt: SAVED_AT });
+
+	await manager.forget('example');
+
+	assert.equal(savedData.length, 1);
+	assert.equal(savedData[0]!.savedAt, SAVED_AT);
+});
+
+clockTest('a completed index check saves its start time and later checks do not save alone', async (t) => {
+	const vault = createVault({ 'S.md': INDEXED_SOURCE });
+	vault.setStat('S.md', 10, 10);
+	const { manager, savedData } = createManager({ vault });
+	manager.load(
+		storedIndex({ 'S.md': { text: INDEXED_SOURCE, mtime: 10, ids: ['i'], sourceIds: ['i'] } }),
+	);
+	const now = t.mock.method(Date, 'now', () => 5000);
+
+	await settleOnClock(t, manager.filesForId('i'));
+	assert.deepEqual(
+		savedData.map((data) => data.savedAt),
+		[5000],
+	);
+
+	// The same note is rescanned unchanged: the time moves on but nothing is written.
+	now.mock.mockImplementation(() => 9000);
+	manager.markModified(eventFile('S.md'));
+	await settleOnClock(t, manager.filesForId('i'));
+	assert.equal(savedData.length, 1);
+
+	// The next real change writes the time the second check recorded.
+	await manager.forget('unknown');
+	assert.equal(savedData.length, 1);
+	vault.write('S.md', `${INDEXED_SOURCE}<!--#j+-->\nj\n<!--#j/-->\n`);
+	manager.markModified(eventFile('S.md'));
+	await settleOnClock(t, manager.filesForId('j'));
+	assert.deepEqual(
+		savedData.map((data) => data.savedAt),
+		[5000, 9000],
+	);
+});
+
+clockTest('a pass that changes nothing does not save again; a real change does', async (t) => {
+	const owner = {};
+	const { manager, vault, saveCalls, clears } = createManager({
+		vault: createVault({ 'A.md': X_SOURCE }),
+	});
+	manager.observe(owner, 'A.md', X_SOURCE);
+	await runUntil(t, () => clears.length === 1);
+	const settledSaves = saveCalls.length;
+	assert.ok(settledSaves > 0);
+
+	// A re-render of identical text runs a pass, which finds nothing to persist.
+	manager.observe(owner, 'A.md', X_SOURCE);
+	await runUntil(t, () => clears.length === 2);
+	assert.equal(saveCalls.length, settledSaves);
+
+	// A new ID changes the index, so this pass saves.
+	const edited = X_SOURCE + Y_SOURCE;
+	vault.write('A.md', edited);
+	manager.observe(owner, 'A.md', edited, undefined, true);
+	await runUntil(t, () => clears.length === 3);
+	assert.equal(saveCalls.length, settledSaves + 1);
+	const saved = saveCalls[saveCalls.length - 1] as {
+		files: Record<string, { ids: string[] }>;
+	};
+	assert.deepEqual(saved.files['A.md']!.ids, ['x', 'y']);
+});
+
+clockTest('an in-app source edit changes its fingerprint and saves it', async (t) => {
+	const owner = {};
+	const { manager, vault, saveCalls, clears } = createManager({
+		vault: createVault({ 'A.md': X_SOURCE }),
+	});
+	manager.observe(owner, 'A.md', X_SOURCE);
+	await runUntil(t, () => clears.length === 1);
+	const hashOf = () => 
+		(saveCalls[saveCalls.length - 1] as { hashes: Record<string, string> }).hashes.x;
+	const before = hashOf();
+	assert.match(before!, /^v1:/);
+
+	const edited = '<!--#x+-->\nchanged\n<!--#x/-->\n';
+	vault.write('A.md', edited);
+	manager.observe(owner, 'A.md', edited, undefined, true);
+	await runUntil(t, () => clears.length === 2);
+
+	assert.match(hashOf()!, /^v1:/);
+	assert.notEqual(hashOf(), before);
+});
+
+async function observeInitially(
+	t: TestContext,
+	files: Record<string, string>,
+	observed: string,
+) {
+	const owner = {};
+	const harness = createManager({ vault: createVault(files) });
+	harness.manager.observe(owner, observed, files[observed]!);
+	await runUntil(t, () => harness.clears.length === 1);
+	assert.deepEqual(harness.issues, []);
+	return { ...harness, owner };
+}
+
+clockTest('editing one source skips the other blocks and the notes only they touch', async (t) => {
+	const brokenReference = '<!--#y=-->\nstale\n';
+	const files = {
+		'A.md': X_SOURCE + Y_SOURCE,
+		'B.md': '<!--#y=-->\ny\n<!--#y/-->\n',
+	};
+	const { manager, owner, vault, issues, clears, visible } = await observeInitially(t, files, 'A.md');
+	// B no longer parses, but no event told the manager, so only a pass over y would find it.
+	vault.write('B.md', brokenReference);
+	const readsBefore = vault.reads.length;
+
+	const edited = '<!--#x+-->\nx2\n<!--#x/-->\n' + Y_SOURCE;
+	vault.write('A.md', edited);
+	manager.observe(owner, 'A.md', edited, undefined, true);
+	await runUntil(t, () => clears.length === 2);
+
+	assert.deepEqual(sortedKeys(clears.slice(1)), [['', 'A.md', 'block:x']]);
+	assert.deepEqual(issues, []);
+	assert.deepEqual(visible.list, []);
+	assert.deepEqual(vault.reads.slice(readsBefore), ['A.md']);
+
+	// The same observation as a plain re-render re-checks y and finds B.
+	manager.observe(owner, 'A.md', edited);
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(visible.list, ['B.md:1: unclosed reference block y (closing marker is missing)']);
+});
+
+clockTest('typing outside any block runs no pass; typing inside one does', async (t) => {
+	const initial = `${X_SOURCE}tail\n`;
+	const { manager, owner, vault, clears } = await observeInitially(t, { 'A.md': initial }, 'A.md');
+	const readsBefore = vault.reads.length;
+
+	const typed = `${X_SOURCE}tail more\n`;
+	vault.write('A.md', typed);
+	manager.observe(owner, 'A.md', typed, undefined, true);
+	t.mock.timers.runAll();
+	await flushEventLoop();
+	assert.equal(clears.length, 1);
+	assert.equal(vault.reads.length, readsBefore);
+
+	const inside = '<!--#x+-->\nx2\n<!--#x/-->\ntail more\n';
+	vault.write('A.md', inside);
+	manager.observe(owner, 'A.md', inside, undefined, true);
+	await runUntil(t, () => clears.length === 2);
+	assert.deepEqual(vault.reads.slice(readsBefore), ['A.md']);
+});
+
+clockTest('breaking a closing marker mid-edit still reports the note parse error', async (t) => {
+	const initial = Y_SOURCE + X_SOURCE;
+	const { manager, owner, vault, issues } = await observeInitially(t, { 'A.md': initial }, 'A.md');
+
+	const broken = `${Y_SOURCE}<!--#x+-->\nx\n`;
+	vault.write('A.md', broken);
+	manager.observe(owner, 'A.md', broken, undefined, true);
+	await runUntil(t, () => issues.length === 1);
+
+	assert.deepEqual(issues, [
+		{ 'A.md': ['A.md:4: unclosed source block x (closing marker is missing)'] },
+	]);
+});
+
+clockTest('deleting a whole block re-checks its ID so a remaining reference reports it', async (t) => {
+	const files = { 'A.md': X_SOURCE + Y_SOURCE, 'B.md': '<!--#x=-->\nx\n<!--#x/-->\n' };
+	const { manager, owner, vault, issues, visible } = await observeInitially(t, files, 'A.md');
+
+	vault.write('A.md', Y_SOURCE);
+	manager.observe(owner, 'A.md', Y_SOURCE, undefined, true);
+	await runUntil(t, () => issues.length === 1);
+
+	assert.deepEqual(visible.list, [X_NO_SOURCE_ERROR]);
+});
+
+clockTest('IDs that are prefixes of each other synchronize correctly in one full pass', async (t) => {
+	const source =
+		'<!--#a+-->\nA\n<!--#a/-->\n<!--#ab+-->\nAB\n<!--#ab/-->\n';
+	const reference =
+		'<!--#ab=-->\n<!--#ab/-->\n<!--#a=-->\n<!--#a/-->\n';
+	const { manager, vault, issues } = createManager({
+		vault: createVault({ 'R.md': reference, 'S.md': source }),
+	});
+
+	await synchronizeAllOnClock(t, manager);
+
+	assert.equal(vault.text('R.md'), '<!--#ab=-->\nAB\n<!--#ab/-->\n<!--#a=-->\nA\n<!--#a/-->\n');
+	assert.equal(vault.text('S.md'), source);
+	assert.deepEqual(issues, []);
+});
+
+clockTest('scope expansion for a nested block reads each note once in a pass', async (t) => {
+	const source = (body: string) =>
+		`<!--#p+-->\n${body}\n<!--#c+-->\nkid\n<!--#c/-->\n<!--#p/-->\n`;
+	const copy = (body: string) =>
+		`<!--#p=-->\n${body}\n<!--#c=-->\nkid\n<!--#c/-->\n<!--#p/-->\n`;
+	const files = {
+		'P.md': source('pre'),
+		'Q.md': copy('pre'),
+		'R.md': '<!--#c=-->\nkid\n<!--#c/-->\n',
+	};
+	const { manager, owner, vault, issues } = await observeInitially(t, files, 'P.md');
+	const readsBefore = vault.reads.length;
+
+	// Only p's own text changes, so c is reached by nesting: its copy in R.md joins the scope.
+	vault.write('P.md', source('pre2'));
+	manager.observe(owner, 'P.md', source('pre2'), undefined, true);
+	await runUntil(t, () => vault.text('Q.md') === copy('pre2'));
+
+	assert.deepEqual([...vault.reads.slice(readsBefore)].sort(), ['P.md', 'Q.md', 'R.md']);
+	assert.deepEqual(issues, []);
 });

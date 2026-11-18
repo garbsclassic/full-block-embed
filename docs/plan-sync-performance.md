@@ -43,13 +43,13 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 - [x] Move the four `vault.on` registrations into `onLayoutReady`
 - [x] Persist the save time and scan newer notes on the first index check
-- [ ] Check: unit tests cover a note created while closed; startup in the kb vault doesn't read every note
+- [ ] Check: unit tests cover a note created while closed; startup in the kb vault doesn't read every note — the unit tests pass and fail when the check is removed; the full-vault read at startup isn't measured in Obsidian, only reasoned from the event registration
 
 ### 3. Raise the debounce and persist on change (after 2)
 
 - [x] `SYNC_DELAY` to 500 ms
 - [x] Dirty flag in `save`; `setIndexedPath` returns early for an unchanged entry
-- [ ] Check: a pass that changes nothing doesn't call `saveData`
+- [x] Check: a pass that changes nothing doesn't call `saveData`
 
 ### 4. Skip rescans of notes open in an editor (after 3)
 
@@ -60,12 +60,12 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 - [x] Store each observation's block-body map and diff against it
 - [x] Queue changed, added, and removed block IDs for in-app edits
-- [ ] Check: typing in one block of a note with several queues only that block; breaking a marker still reports the parse error
+- [x] Check: typing in one block of a note with several queues only that block; breaking a marker still reports the parse error
 
 ### 6. Plan each ID over its own files (after 5)
 
 - [x] Filter `planSync`'s files per ID; `expandNestedScope` reads and parses only new paths
-- [ ] Check: sync-now result unchanged; tests pass. Measured 2026-11-18: planning 100 IDs over 300 notes (one source and two references each) took 157 ms before, 5.7 ms after
+- [x] Check: sync-now result unchanged; tests pass. Measured 2026-11-18: planning 100 IDs over 300 notes (one source and two references each) took 157 ms before, 5.7 ms after
 
 ## What this breaks
 
@@ -76,3 +76,11 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 - `npm run check` and `npm run build` after each step
 - In the kb vault with Hot Reload: typing in a source updates its open reference after a pause; a broken marker shows its issue; restarting Obsidian doesn't trigger a full-vault read
+
+Run 2026-11-18 in the kb vault, using scratch notes at the vault root that were deleted afterwards:
+
+- After View → Force Reload, data.json carried `savedAt` and no `sourcePaths`.
+- Editing a source block's body in Source mode updated its reference on disk; the note's other block was untouched.
+- Typing six characters 300 ms apart into a source produced one write to the closed reference note, after typing stopped. A file watcher polled its mtime every 20 ms.
+- Unit tests (93) cover the startup check, the save time, dirty-flag saves, edit scope, the planning filter, and one read per note during scope expansion. Removing the edit-scope narrowing or the startup check makes the matching tests fail.
+- Not checked in Obsidian: the broken-marker issue (unit-tested), and whether a cold start reads every note.

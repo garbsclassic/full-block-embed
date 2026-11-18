@@ -64,3 +64,13 @@ test('loading drops baselines that are not fingerprints and indexes without a ve
 	assert.deepEqual(loaded.hashes, { kept: hash });
 	assert.equal(loaded.files, undefined);
 });
+
+test('loading defaults the save time to 0 when it is missing or not a finite number', () => {
+	const stored = { version: 3 as const, hashes: {}, knownRefs: {}, files: {} };
+
+	assert.equal(loadSyncState(stored).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: Number.NaN }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: Infinity }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: '5' as unknown as number }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: 42 }).savedAt, 42);
+});
