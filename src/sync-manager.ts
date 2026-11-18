@@ -28,7 +28,8 @@ export interface LiveDocument {
 interface Observation {
 	path: string;
 	ids: Set<string>;
-	text: string;
+	/** Normalized block bodies by change key, to diff against the next observation. */
+	bodies: Map<string, string>;
 	document?: LiveDocument;
 	revision: number;
 }
@@ -134,19 +135,29 @@ export class BlockSyncManager {
 			this.unobserve(owner, path);
 			return;
 		}
-		if (editedInObsidian && previous?.path === path)
-			for (const key of changedBlockKeys(path, previous.text, text))
-				this.localChanges.add(key);
+		const bodies = blockBodiesByKey(path, parsed.blocks);
+		let requested: Set<string>;
+		if (editedInObsidian && previous?.path === path) {
+			// An in-app edit re-checks only what it touched: a changed or new body, a block that
+			// disappeared (which also covers a marker broken mid-edit), or a marker ID that came or
+			// went. Outside changes to other blocks arrive through vault events instead.
+			const changed = changedBlockKeys(previous.bodies, bodies);
+			for (const key of changed) this.localChanges.add(key);
+			requested = new Set([
+				...[...changed, ...changedBlockKeys(bodies, previous.bodies)].map(changeKeyId),
+				...[...ids].filter((id) => !previous.ids.has(id)),
+				...[...previous.ids].filter((id) => !ids.has(id)),
+			]);
+		} else requested = new Set([...ids, ...(previous?.ids ?? [])]);
 		this.observations.set(owner, {
 			path,
 			ids,
-			text,
+			bodies,
 			document,
 			revision: ++this.observationRevision,
 		});
 		this.indexParsed(path, text, parsed.blocks);
 		this.rebuildActiveIds();
-		const requested = new Set([...ids, ...(previous?.ids ?? [])]);
 		if (requested.size) this.queue(requested, previous ? SYNC_DELAY : 0);
 	}
 
@@ -264,7 +275,7 @@ export class BlockSyncManager {
 
 	async forget(id: string): Promise<void> {
 		const refs = Object.entries(this.knownRefs);
-		const keptRefs = refs.filter(([key]) => key.split('\u0000')[1] !== id);
+		const keptRefs = refs.filter(([key]) => changeKeyId(key) !== id);
 		const hadHash = Object.prototype.hasOwnProperty.call(this.hashes, id);
 		if (hadHash || keptRefs.length !== refs.length) this.unsaved = true;
 		delete this.hashes[id];
@@ -755,7 +766,7 @@ export class BlockSyncManager {
 
 	private clearLocalChanges(ids: ReadonlySet<string>): void {
 		for (const key of this.localChanges)
-			if (ids.has(key.split('\u0000')[1] ?? ''))
+			if (ids.has(changeKeyId(key)))
 				this.localChanges.delete(key);
 	}
 
@@ -853,24 +864,23 @@ function markerIds(text: string, blocks: Block[]): Set<string> {
 	return ids;
 }
 
+/** Keys of blocks whose body differs from, or is missing in, `previous`. */
 function changedBlockKeys(
-	path: string,
-	previousText: string,
-	currentText: string,
-): Set<string> {
-	const previous = blockBodiesByKey(path, previousText);
-	const current = blockBodiesByKey(path, currentText);
-	return new Set(
-		[...current].flatMap(([key, body]) =>
-			previous.get(key) === body ? [] : [key],
-		),
-	);
+	previous: ReadonlyMap<string, string>,
+	current: ReadonlyMap<string, string>,
+): string[] {
+	return [...current].flatMap(([key, body]) => (previous.get(key) === body ? [] : [key]));
 }
 
-function blockBodiesByKey(path: string, text: string): Map<string, string> {
+/** Change keys carry the block ID as their second field (see `sourceChangeKey`). */
+function changeKeyId(key: string): string {
+	return key.split('\u0000')[1] ?? '';
+}
+
+function blockBodiesByKey(path: string, blocks: Block[]): Map<string, string> {
 	const result = new Map<string, string>();
 	const ordinals = new Map<string, number>();
-	for (const block of parseFile(path, text).blocks) {
+	for (const block of blocks) {
 		if (block.kind === '+') {
 			result.set(sourceChangeKey(path, block.id), normalize(block.body));
 			continue;

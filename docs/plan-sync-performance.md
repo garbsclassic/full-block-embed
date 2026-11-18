@@ -25,7 +25,7 @@ Out:
 | Startup events | Register vault events in `onLayoutReady`, and on the first index check scan notes whose `mtime` or `ctime` is newer than the last save | Keep `onload` registration | The load-time `create` event for every note marks the whole vault dirty, so the first sync reads every note |
 | Debounce | `SYNC_DELAY` 500 ms | 100 ms | Typing leaves 150–250 ms between keys, so 100 ms ran a pass between most keystrokes |
 | Persisting | A dirty flag set where persisted state changes; an unchanged index entry is not rewritten | Stringify the whole index per pass to detect changes | Skips both the stringify and the per-keystroke index rewrite |
-| Redundant rescans | A dirty note open in an editor refreshes only its stat | Also skip notes the plugin just wrote | An outside edit landing between the plugin's write and the drain would be skipped and leave the index stale |
+| Redundant rescans | Keep them (step 4 dropped) | Skip notes the plugin just wrote; skip notes open in an editor | An outside edit landing between the plugin's write and the drain would be skipped and leave the index stale; an open note is already rescanned from its buffer, not the disk |
 | Edit scope | An in-app edit queues the blocks whose body changed, appeared, or disappeared | Queue every ID in the note | A disappearing block covers a broken marker, so parse errors still surface |
 | Parses per pass | Plan each ID over only the files whose text contains its marker prefix | Thread parse results through `planSync` | A superset filter is a few lines and turns the IDs × files parses into roughly the copy count |
 
@@ -53,13 +53,13 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 ### 4. Skip rescans of notes open in an editor (after 3)
 
-- [ ] `drainDirtyPaths` refreshes stat only for a path with a live document
-- [ ] Check: an autosave of an open note doesn't read it from the vault
+- [ ] `drainDirtyPaths` refreshes stat only for a path with a live document — dropped: `scanFile` already reads an open note from its editor buffer, not the vault, so skipping it saves one parse (about 0.1 ms for 50 KB). The disk reads happen for notes the plugin wrote, which the Decisions table rules out skipping
+- [ ] Check: an autosave of an open note doesn't read it from the vault — dropped with the step
 
-### 5. Parse once and queue only changed blocks (after 4)
+### 5. Parse once and queue only changed blocks (after 3)
 
-- [ ] Store each observation's block-body map and diff against it
-- [ ] Queue changed, added, and removed block IDs for in-app edits
+- [x] Store each observation's block-body map and diff against it
+- [x] Queue changed, added, and removed block IDs for in-app edits
 - [ ] Check: typing in one block of a note with several queues only that block; breaking a marker still reports the parse error
 
 ### 6. Plan each ID over its own files (after 5)

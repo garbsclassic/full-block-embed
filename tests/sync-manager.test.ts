@@ -808,7 +808,7 @@ clockTest('a failed pass does not report an ID that left the index meanwhile', a
 	// Appending a line changes the saved index, so the failed pass's report waits on a save.
 	const edited = `${N}plain\n`;
 	vault.write('A.md', edited);
-	manager.observe(owner, 'A.md', edited, undefined, true);
+	manager.observe(owner, 'A.md', edited);
 	await runUntil(t, () => saveCalls.length === 2);
 
 	// The owner closes and the note is deleted while that report waits.
