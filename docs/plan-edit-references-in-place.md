@@ -13,7 +13,6 @@ Live Preview edits a reference's copied Markdown directly in the note, as Source
 - References get a third button, between open and delete, that converts that one reference to normal text: it removes the reference's marker lines and keeps its Markdown. It reuses the `unwrapBlock` shape, written as one editor transaction so undo restores it.
 - Reading mode keeps only open and delete. Adding the new button there means a file-level unwrap like `removeReferenceFromFile`; left out until asked.
 - Ctrl/Cmd-click to open the source now works only in Reading mode. In an editor it would compete with Obsidian's own Cmd-click behavior.
-- The earlier embedded-editor fixes from this session (preview spacing, hidden markers, click placement, Up/Down to leave) are superseded. They are kept in a stash: `embedded editor fixes, superseded by in-place editing`.
 
 ## Steps
 

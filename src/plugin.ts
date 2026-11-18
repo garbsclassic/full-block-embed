@@ -316,7 +316,7 @@ export default class FullBlockEmbed extends Plugin {
 		view: CodeMirrorEditorView,
 		block: Block,
 	): void {
-		const latest = this.latestReference(view, block, 'delete');
+		const latest = this.latestReference(view, block);
 		if (!latest) return;
 		view.dispatch({
 			changes: { from: latest.start, to: latest.end, insert: '' },
@@ -327,7 +327,7 @@ export default class FullBlockEmbed extends Plugin {
 		view: CodeMirrorEditorView,
 		block: Block,
 	): void {
-		const latest = this.latestReference(view, block, 'convert');
+		const latest = this.latestReference(view, block);
 		if (!latest) return;
 		view.dispatch({
 			changes: {
@@ -341,7 +341,6 @@ export default class FullBlockEmbed extends Plugin {
 	private latestReference(
 		view: CodeMirrorEditorView,
 		block: Block,
-		button: string,
 	): Block | undefined {
 		if (block.kind !== '=') return undefined;
 		const latest = parseFile(block.path, view.state.doc.toString()).blocks.find(
@@ -351,7 +350,7 @@ export default class FullBlockEmbed extends Plugin {
 				candidate.start === block.start,
 		);
 		if (!latest)
-			new Notice(`This reference changed; try the ${button} button again`);
+			new Notice('This reference changed; try again');
 		return latest;
 	}
 	private async removeReferenceFromFile(

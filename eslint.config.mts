@@ -22,6 +22,7 @@ export default defineConfig(
         projectService: {
           // TypeScript 6 no longer loads @types/node by default, which these files need.
           defaultProject: 'tsconfig.node.json',
+          maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 20,
           allowDefaultProject: [
             'eslint.config.mts',
             'manifest.json',
