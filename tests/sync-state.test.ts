@@ -34,6 +34,7 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 				},
 			],
 		]),
+		1234,
 	);
 
 	assert.equal(stored.version, 3);
@@ -50,6 +51,7 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 		hashes: { example: hash },
 		knownRefs: { 'Reference.md\u0000example\u00000': true },
 		files: stored.files,
+		savedAt: 1234,
 	});
 });
 

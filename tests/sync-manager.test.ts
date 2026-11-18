@@ -116,8 +116,10 @@ function createManager({ holdSaves = false, vault = createVault({}) } = {}) {
 		app: { vault },
 		saveData: async (data: unknown) => {
 			// Snapshot the payload as Obsidian would persist it, since the manager keeps
-			// mutating the maps it passed in.
-			saveCalls.push(structuredClone(data));
+			// mutating the maps it passed in. The save time differs per run, so it's dropped.
+			const snapshot = structuredClone(data) as Record<string, unknown>;
+			delete snapshot.savedAt;
+			saveCalls.push(snapshot);
 			if (holdSaves)
 				await new Promise<void>((complete) => heldSaves.push(complete));
 			const failure = failures.shift();

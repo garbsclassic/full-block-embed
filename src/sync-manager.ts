@@ -78,6 +78,8 @@ export class BlockSyncManager {
 	private passDone: Promise<void> = Promise.resolve();
 	private rerun = false;
 	private observationRevision = 0;
+	/** The loaded save time, until the first index check has looked for newer unindexed notes. */
+	private changedSince: number | null = null;
 
 	constructor(
 		private plugin: Plugin,
@@ -99,9 +101,11 @@ export class BlockSyncManager {
 					sourceIds: new Set(entry.sourceIds),
 				});
 		this.indexReady = true;
-		// Stat indexed block notes when a shared block is first displayed. This
-		// finds outside changes without retaining or reading every vault note.
+		// Stat notes when a shared block is first displayed: indexed notes whose stat changed and
+		// unindexed notes newer than the last save. This finds changes made while Obsidian was
+		// closed without retaining or reading every vault note.
 		this.indexValidated = false;
+		this.changedSince = stored.savedAt;
 	}
 
 	unload(): void {
@@ -605,6 +609,7 @@ export class BlockSyncManager {
 		this.pathsById.clear();
 		this.sourcePathsById.clear();
 		this.dirtyPaths.clear();
+		this.changedSince = null;
 		const files = this.plugin.app.vault.getMarkdownFiles();
 		for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
 			for (const file of files.slice(i, i + INDEX_CHUNK_SIZE))
@@ -619,6 +624,16 @@ export class BlockSyncManager {
 	private async refreshChangedFiles(): Promise<void> {
 		const dirty = new Set(this.dirtyPaths);
 		for (const path of dirty) this.dirtyPaths.delete(path);
+		const since = this.changedSince;
+		this.changedSince = null;
+		// ctime catches a note copied in with an older, preserved mtime.
+		if (since !== null)
+			for (const file of this.plugin.app.vault.getMarkdownFiles())
+				if (
+					!this.files.has(file.path) &&
+					Math.max(file.stat.mtime, file.stat.ctime) > since
+				)
+					dirty.add(file.path);
 		const candidates = new Map<string, TFile>();
 		for (const path of new Set([...this.files.keys(), ...dirty])) {
 			const file = this.plugin.app.vault.getAbstractFileByPath(path);
@@ -738,12 +753,8 @@ export class BlockSyncManager {
 	}
 
 	private async save(): Promise<void> {
-		const data = createStoredSyncData(
-			this.hashes,
-			this.knownRefs,
-			this.files,
-		);
-		const serialized = JSON.stringify(data);
+		const data = createStoredSyncData(this.hashes, this.knownRefs, this.files, Date.now());
+		const serialized = JSON.stringify({ ...data, savedAt: 0 });
 		if (serialized === this.lastSaved) return;
 		await this.plugin.saveData(data);
 		this.lastSaved = serialized;

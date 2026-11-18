@@ -10,6 +10,8 @@ export interface StoredSyncData {
 	hashes: Record<string, string>;
 	knownRefs: Record<string, boolean>;
 	files: Record<string, StoredFileIndex>;
+	/** Milliseconds since the epoch; notes changed after it may be missing from `files`. */
+	savedAt: number;
 }
 
 export interface IndexedFileMetadata {
@@ -23,6 +25,7 @@ export interface LoadedSyncState {
 	hashes: Record<string, string>;
 	knownRefs: Record<string, boolean>;
 	files?: Record<string, StoredFileIndex>;
+	savedAt: number;
 }
 
 const FINGERPRINT = /^v1:\d+:[0-9a-f]{32}$/;
@@ -43,13 +46,16 @@ export function loadSyncState(raw: Partial<StoredSyncData> | null): LoadedSyncSt
 					),
 				)
 			: undefined;
-	return { hashes, knownRefs: { ...(stored.knownRefs ?? {}) }, files };
+	// Without a save time, every note counts as possibly changed since the last save.
+	const savedAt = Number.isFinite(stored.savedAt) ? stored.savedAt! : 0;
+	return { hashes, knownRefs: { ...(stored.knownRefs ?? {}) }, files, savedAt };
 }
 
 export function createStoredSyncData(
 	hashes: Record<string, string>,
 	knownRefs: Record<string, boolean>,
 	indexedFiles: ReadonlyMap<string, IndexedFileMetadata>,
+	savedAt: number,
 ): StoredSyncData {
 	const files: Record<string, StoredFileIndex> = {};
 	for (const [path, indexed] of indexedFiles) {
@@ -61,7 +67,7 @@ export function createStoredSyncData(
 			sourceIds: [...indexed.sourceIds].sort(),
 		};
 	}
-	return { version: 3, hashes, knownRefs, files };
+	return { version: 3, hashes, knownRefs, files, savedAt };
 }
 
 function validStoredFile(value: StoredFileIndex): boolean {

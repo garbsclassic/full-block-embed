@@ -41,8 +41,8 @@ The startup check compares against the time of the last save, so it is a superse
 
 ### 2. Register vault events after layout ready (after 1)
 
-- [ ] Move the four `vault.on` registrations into `onLayoutReady`
-- [ ] Persist the save time and scan newer notes on the first index check
+- [x] Move the four `vault.on` registrations into `onLayoutReady`
+- [x] Persist the save time and scan newer notes on the first index check
 - [ ] Check: unit tests cover a note created while closed; startup in the kb vault doesn't read every note
 
 ### 3. Raise the debounce and persist on change (after 2)
