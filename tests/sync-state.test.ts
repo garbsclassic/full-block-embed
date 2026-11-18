@@ -74,3 +74,16 @@ test('loading defaults the save time to 0 when it is missing or not a finite num
 	assert.equal(loadSyncState({ ...stored, savedAt: '5' as unknown as number }).savedAt, 0);
 	assert.equal(loadSyncState({ ...stored, savedAt: 42 }).savedAt, 42);
 });
+
+test('loading keeps only known references whose value is exactly true', () => {
+	const loaded = loadSyncState({
+		knownRefs: {
+			kept: true,
+			text: 'false' as unknown as boolean,
+			number: 1 as unknown as boolean,
+			off: false,
+		},
+	});
+
+	assert.deepEqual(loaded.knownRefs, { kept: true });
+});

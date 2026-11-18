@@ -76,7 +76,7 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 - [x] A forced rescan resets the saved time until it completes; a failed read stops it advancing
 - [x] Vault events register in `onload`, with `create` ignored until layout ready
 - [x] `loadSyncState` keeps only `knownRefs` set to `true`
-- [ ] Check: regression tests for each, failing with the fix reverted
+- [x] Check: regression tests for each, failing with the fix reverted (98 tests; all five new ones fail against the pre-fix sources)
 
 ## What this breaks
 
@@ -93,5 +93,5 @@ Run 2026-11-18 in the kb vault, using scratch notes at the vault root that were 
 - After View → Force Reload, data.json carried `savedAt` and no `sourcePaths`.
 - Editing a source block's body in Source mode updated its reference on disk; the note's other block was untouched.
 - Typing six characters 300 ms apart into a source produced one write to the closed reference note, after typing stopped. A file watcher polled its mtime every 20 ms.
-- Unit tests (93) cover the startup check, the save time, dirty-flag saves, edit scope, the planning filter, and one read per note during scope expansion. Removing the edit-scope narrowing or the startup check makes the matching tests fail.
+- Unit tests (98) cover the startup check, the save time, dirty-flag saves, edit scope, the planning filter, and one read per note during scope expansion. Removing the edit-scope narrowing or the startup check makes the matching tests fail.
 - Not checked in Obsidian: the broken-marker issue (unit-tested), and whether a cold start reads every note.

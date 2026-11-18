@@ -65,6 +65,8 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 	const stats = new Map<string, { mtime: number; ctime: number }>();
 	// Every path the manager reads from the vault, in order, so tests can show a note was skipped.
 	const reads: string[] = [];
+	const readHolds = new Map<string, Promise<void>>();
+	const readFailures = new Set<string>();
 	let holding = holdProcess;
 	const fileAt = (path: string): VaultFile =>
 		Object.assign(new TFile(), {
@@ -81,6 +83,8 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 		getMarkdownFiles: () => [...texts.keys()].sort().map(fileAt),
 		read: async (file: VaultFile) => {
 			reads.push(file.path);
+			await readHolds.get(file.path);
+			if (readFailures.delete(file.path)) throw new Error(`cannot read ${file.path}`);
 			return texts.get(file.path) ?? '';
 		},
 		process: async (file: VaultFile, update: (text: string) => string) => {
@@ -101,6 +105,16 @@ function createVault(notes: Record<string, string>, { holdProcess = false } = {}
 			stats.set(path, { mtime, ctime });
 		},
 		text: (path: string) => texts.get(path),
+		// Reads of the note wait until the returned function runs, as a slow disk read does.
+		holdRead: (path: string) => {
+			let release!: () => void;
+			readHolds.set(path, new Promise<void>((resolve) => (release = resolve)));
+			return release;
+		},
+		// The next read of the note rejects once, as a locked file does.
+		failNextRead: (path: string) => {
+			readFailures.add(path);
+		},
 		reads,
 		// Stands in for a note deleted or renamed away, so a later full scan no longer finds it.
 		remove: (path: string) => {
@@ -1145,4 +1159,138 @@ clockTest('scope expansion for a nested block reads each note once in a pass', a
 
 	assert.deepEqual([...vault.reads.slice(readsBefore)].sort(), ['P.md', 'Q.md', 'R.md']);
 	assert.deepEqual(issues, []);
+});
+
+const U_REFERENCE = '<!--#u=-->\nold\n<!--#u/-->\n';
+const U_SOURCE = '<!--#u+-->\nnew\n<!--#u/-->\n';
+const N_SOURCE = '<!--#n+-->\nn\n<!--#n/-->\n';
+
+// Notes N.md and S.md are indexed as of the save at 1000; U.md gained a reference afterwards.
+function closedWhileEditedVault() {
+	const vault = createVault({ 'N.md': N_SOURCE, 'S.md': U_SOURCE, 'U.md': U_REFERENCE });
+	vault.setStat('U.md', 2000, 2000);
+	return vault;
+}
+
+function closedWhileEditedState() {
+	return storedIndex({
+		'N.md': { text: N_SOURCE, mtime: 0, ids: ['n'], sourceIds: ['n'] },
+		'S.md': { text: U_SOURCE, mtime: 0, ids: ['u'], sourceIds: ['u'] },
+	});
+}
+
+function lastSavedAt(saved: Array<Record<string, unknown>>): unknown {
+	return saved[saved.length - 1]?.savedAt;
+}
+
+// A new manager loaded from the last saved data stands in for restarting Obsidian.
+async function pathsAfterRestart(
+	t: TestContext,
+	saved: Record<string, unknown> | undefined,
+): Promise<string[]> {
+	const restarted = createManager({ vault: closedWhileEditedVault() });
+	restarted.manager.load(saved as Parameters<typeof restarted.manager.load>[0]);
+	const files = await settleOnClock(t, restarted.manager.filesForId('u'));
+	return files.map((file) => file.path).sort();
+}
+
+clockTest('an unrelated parse error outside every block is re-checked as it changes', async (t) => {
+	const owner = {};
+	const source = (body: string, stray: boolean) =>
+		`<!--#y+-->\n${body}\n<!--#y/-->\n${stray ? '<!--#y/-->\n' : ''}`;
+	const reference = (body: string) => `<!--#y=-->\n${body}\n<!--#y/-->\n`;
+	const { manager, vault, issues, clears, visible } = createManager({
+		vault: createVault({ 'N.md': source('hello', false), 'R.md': reference('hello') }),
+	});
+	let text = source('hello', false);
+	const document = { read: () => text, apply: () => false };
+	manager.observe(owner, 'N.md', text, document);
+	await runUntil(t, () => clears.length === 1);
+	const edit = async (next: string, reported: () => boolean) => {
+		text = next;
+		manager.observe(owner, 'N.md', text, document, true);
+		await runUntil(t, reported);
+	};
+
+	// A stray closing marker changes no block body, yet it breaks the note.
+	await edit(source('hello', true), () => issues.length === 1);
+	const strayError = visible.list[0]!;
+	assert.match(strayError, /^N\.md:4: /);
+
+	// The block edit queues y, but the note still fails to parse, so nothing is written.
+	await edit(source('hello world', true), () => issues.length === 2);
+	assert.deepEqual(visible.list, [strayError]);
+	assert.equal(vault.text('R.md'), reference('hello'));
+
+	// Deleting the stray line changes the error list, so every ID is re-checked.
+	await edit(source('hello world', false), () => clears.length === 2);
+	assert.equal(vault.text('R.md'), reference('hello world'));
+	assert.deepEqual(visible.list, []);
+});
+
+clockTest('a drain during the first index check keeps the loaded save time', async (t) => {
+	const owner = {};
+	const vault = closedWhileEditedVault();
+	const release = vault.holdRead('U.md');
+	const { manager, savedData } = createManager({ vault });
+	manager.load(closedWhileEditedState());
+
+	// The first check is reading U.md when an autosave's modify event drains.
+	manager.observe(owner, 'N.md', N_SOURCE);
+	await flushEventLoop();
+	manager.markModified(eventFile('N.md'));
+	t.mock.timers.runAll();
+	await flushEventLoop();
+	await manager.forget('unknown');
+
+	assert.equal(savedData.length, 1);
+	assert.equal(savedData[0]!.savedAt, SAVED_AT);
+	assert.deepEqual(Object.keys(savedData[0]!.files as object).sort(), ['N.md', 'S.md']);
+
+	release();
+	await flushEventLoop();
+	// After a restart from that save, the newer note is still found.
+	assert.deepEqual(await pathsAfterRestart(t, savedData[0]), ['S.md', 'U.md']);
+});
+
+clockTest('a save during a forced rescan writes a save time of 0', async (t) => {
+	const { manager, vault, savedData } = createManager({ vault: closedWhileEditedVault() });
+	manager.load(closedWhileEditedState());
+	t.mock.method(Date, 'now', () => 5000);
+	await settleOnClock(t, manager.filesForId('u'));
+	assert.equal(lastSavedAt(savedData), 5000);
+
+	// The rescan has dropped the index and is reading again, so a save now holds a partial one.
+	const release = vault.holdRead('S.md');
+	const full = manager.synchronizeAll();
+	await flushEventLoop();
+	await manager.forget('unknown');
+	assert.equal(lastSavedAt(savedData), 0);
+
+	release();
+	await settleOnClock(t, full);
+});
+
+clockTest('a failed read stops the save time advancing and the note is found after restart', async (t) => {
+	t.mock.method(console, 'error', () => undefined);
+	const vault = closedWhileEditedVault();
+	vault.failNextRead('U.md');
+	const { manager, savedData } = createManager({ vault });
+	manager.load(closedWhileEditedState());
+	t.mock.method(Date, 'now', () => 5000);
+
+	assert.deepEqual(
+		(await settleOnClock(t, manager.filesForId('u'))).map((file) => file.path),
+		['S.md'],
+	);
+	assert.equal(lastSavedAt(savedData), SAVED_AT);
+
+	// A later clean check and a real index change still save the old time.
+	vault.write('N.md', `${N_SOURCE}<!--#m+-->\nm\n<!--#m/-->\n`);
+	manager.markModified(eventFile('N.md'));
+	await settleOnClock(t, manager.filesForId('m'));
+	assert.equal(savedData.length, 2);
+	assert.equal(savedData[1]!.savedAt, SAVED_AT);
+
+	assert.deepEqual(await pathsAfterRestart(t, savedData[1]), ['S.md', 'U.md']);
 });
