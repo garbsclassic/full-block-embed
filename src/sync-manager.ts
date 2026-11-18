@@ -192,7 +192,9 @@ export class BlockSyncManager {
 		if (!this.indexReady && !this.working) return;
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		if (this.activeIds.size) this.schedule(SYNC_DELAY);
+		// A pending timer already brings the index up to date, and resetting it would let a stream
+		// of outside edits hold back every queued pass.
+		if (this.activeIds.size && this.timer === null) this.schedule(SYNC_DELAY);
 	}
 
 	markDeleted(file: TFile): void {
@@ -311,28 +313,30 @@ export class BlockSyncManager {
 
 	/** Starts the work loop unless it is running, and resolves when it runs out of due work. */
 	private settle(): Promise<void> {
-		this.working ??= this.work().finally(() => {
-			this.working = null;
-		});
-		return this.working;
+		return (this.working ??= this.work());
 	}
 
 	private async work(): Promise<void> {
-		do {
-			const full = this.fullPass;
-			this.fullPass = false;
-			await this.updateIndex(full);
-			// Queued IDs wait out the debounce; a full pass takes them along with every indexed ID.
-			if (!full && this.timer !== null) continue;
-			const ids = new Set([...this.queuedIds, ...(full ? this.pathsById.keys() : [])]);
-			this.queuedIds.clear();
-			if (ids.size || full) await this.synchronize(ids);
-		} while (
-			this.fullPass ||
-			!this.indexReady ||
-			!this.indexValidated ||
-			(this.timer === null && this.queuedIds.size > 0)
-		);
+		// The first step always awaits, so `working` is set before the finally clears it.
+		try {
+			do {
+				const full = this.fullPass;
+				this.fullPass = false;
+				await this.updateIndex(full);
+				// Queued IDs wait out the debounce; a full pass takes them with every indexed ID.
+				if (!full && this.timer !== null) continue;
+				const ids = new Set([...this.queuedIds, ...(full ? this.pathsById.keys() : [])]);
+				this.queuedIds.clear();
+				if (ids.size || full) await this.synchronize(ids);
+			} while (
+				this.fullPass ||
+				!this.indexReady ||
+				!this.indexValidated ||
+				(this.timer === null && this.queuedIds.size > 0)
+			);
+		} finally {
+			this.working = null;
+		}
 	}
 
 	private async synchronize(ids: Set<string>): Promise<void> {
@@ -580,8 +584,7 @@ export class BlockSyncManager {
 		return block ? { block, file } : null;
 	}
 
-	// Only the loop calls this, so dirty notes are never scanned twice at once and only a
-	// completed check advances the saved time.
+	// Only the loop calls this, so dirty notes are never scanned twice at once.
 	private async updateIndex(force: boolean): Promise<void> {
 		if (this.indexReady && this.indexValidated && !force) return;
 		if (force || !this.indexReady) await this.scanVault();

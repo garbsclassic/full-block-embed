@@ -1367,3 +1367,75 @@ clockTest('a read waits for a running pass and returns the text it wrote', async
 	const synced = '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\nnew\n<!--#foo/-->\n';
 	assert.deepEqual(await files, [{ path: 'A.md', text: synced }]);
 });
+
+clockTest('a rejected live edit is retried after the debounce and then applied', async (t) => {
+	const owner = {};
+	const { manager } = createManager({ vault: createVault({ 'A.md': UNSYNCED_A }) });
+	let text = UNSYNCED_A;
+	let applies = 0;
+	const document = {
+		read: () => text,
+		apply: (patches: Array<{ from: number; to: number; body: string }>) => {
+			// The first attempt loses the race to the user's typing and is refused.
+			if (++applies === 1) return false;
+			for (const patch of patches)
+				text = text.slice(0, patch.from) + patch.body + text.slice(patch.to);
+			return true;
+		},
+	};
+	manager.observe(owner, 'A.md', text, document);
+	await runUntil(t, () => text !== UNSYNCED_A);
+
+	assert.equal(applies, 2);
+	assert.equal(text, '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\nnew\n<!--#foo/-->\n');
+});
+
+clockTest('outside edits under 500 ms apart do not hold back a queued pass', async (t) => {
+	const { manager, owner, vault } = await observeInitially(
+		t,
+		{ 'A.md': X_SOURCE, 'B.md': X_COPY, 'C.md': 'plain\n' },
+		'A.md',
+	);
+
+	const edited = '<!--#x+-->\nx2\n<!--#x/-->\n';
+	vault.write('A.md', edited);
+	manager.observe(owner, 'A.md', edited, undefined, true);
+	// A modify event every 400 ms must not keep resetting the debounce the edit is waiting on.
+	for (let i = 0; i < 10 && vault.text('B.md') === X_COPY; i++) {
+		t.mock.timers.tick(400);
+		await flushEventLoop();
+		// Zero-delay ticks let the pass through its index yields without nearing the debounce.
+		for (let step = 0; step < 20; step++) {
+			t.mock.timers.tick(0);
+			await flushEventLoop();
+		}
+		manager.markModified(eventFile('C.md'));
+	}
+
+	assert.equal(vault.text('B.md'), '<!--#x=-->\nx2\n<!--#x/-->\n');
+});
+
+clockTest('synchronizeAll called as a read finishes still rescans the vault', async (t) => {
+	// Each depth lands the call one microtask later, so one of them meets the loop as it ends.
+	for (let depth = 0; depth < 8; depth++) {
+		const { manager, vault } = await observeInitially(
+			t,
+			{ 'A.md': X_SOURCE, 'B.md': X_COPY, 'C.md': 'plain\n' },
+			'A.md',
+		);
+		const readsBefore = vault.reads.length;
+		const read = manager.filesForId('x');
+		// No event reports this edit, so only a rescan can find the new block.
+		vault.write('C.md', '<!--#m+-->\nm\n<!--#m/-->\n');
+		let chain: Promise<unknown> = Promise.resolve();
+		for (let i = 0; i < depth; i++) chain = chain.then(() => undefined);
+		const full = chain.then(() => manager.synchronizeAll());
+		await settleOnClock(t, read);
+		await settleOnClock(t, full);
+
+		// Only a rescan reads C.md, and it must have run by the time the call resolves.
+		assert.ok(vault.reads.slice(readsBefore).includes('C.md'), `depth ${depth}: no rescan`);
+		const files = await settleOnClock(t, manager.filesForId('m'));
+		assert.deepEqual(files.map((file) => file.path), ['C.md']);
+	}
+});
