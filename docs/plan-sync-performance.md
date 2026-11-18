@@ -22,14 +22,16 @@ Out:
 | Decision | Chosen | Rejected | Why |
 | --- | --- | --- | --- |
 | Legacy data | Drop `sourcePaths`, `revisions`, and full-content baselines | Keep loading them | Nothing reads `sourcePaths`; the kb vault's data is already v3 fingerprints |
-| Startup events | Register vault events in `onLayoutReady`, and on the first index check scan notes whose `mtime` or `ctime` is newer than the last save | Keep `onload` registration | The load-time `create` event for every note marks the whole vault dirty, so the first sync reads every note |
+| Startup events | Register vault events in `onload` but ignore `create` until `layoutReady`, and on the first index check scan notes whose `mtime` or `ctime` is newer than the saved time | Register everything in `onLayoutReady` (first version, changed after review: it dropped events between load and layout ready); keep `create` live during load | The load-time `create` event for every note marks the whole vault dirty, so the first sync reads every note |
 | Debounce | `SYNC_DELAY` 500 ms | 100 ms | Typing leaves 150–250 ms between keys, so 100 ms ran a pass between most keystrokes |
 | Persisting | A dirty flag set where persisted state changes; an unchanged index entry is not rewritten | Stringify the whole index per pass to detect changes | Skips both the stringify and the per-keystroke index rewrite |
 | Redundant rescans | Keep them (step 4 dropped) | Skip notes the plugin just wrote; skip notes open in an editor | An outside edit landing between the plugin's write and the drain would be skipped and leave the index stale; an open note is already rescanned from its buffer, not the disk |
-| Edit scope | An in-app edit queues the blocks whose body changed, appeared, or disappeared | Queue every ID in the note | A disappearing block covers a broken marker, so parse errors still surface |
+| Edit scope | An in-app edit queues the blocks whose body changed, appeared, or disappeared; one that changes the note's parse errors queues every ID | Queue every ID in the note | A stray marker outside every block changes no body, so the error comparison catches it |
 | Parses per pass | Plan each ID over only the files whose text contains its marker prefix | Thread parse results through `planSync` | A superset filter is a few lines and turns the IDs × files parses into roughly the copy count |
 
-The saved time (`savedAt`) is when the last completed index check started, with nothing left dirty, not when the data was written. A save before the first check of a session keeps the loaded time, so quitting early can't hide notes changed while Obsidian was closed. Advancing the time doesn't trigger a save on its own, so a stale time only means more notes get re-read once. A note copied in with a preserved, older `mtime` is still caught by its `ctime`.
+The saved time (`savedAt`) is when the last completed index check started, with nothing left dirty, not when the data was written. A save before the first check of a session keeps the loaded time, so quitting early can't hide notes changed while Obsidian was closed. Advancing the time doesn't trigger a save on its own, so a stale time only means more notes get re-read once. Only a completed index check advances it: dirty-note drains go through the check, a forced rescan resets it to 0 until it finishes, and a failed read keeps it for the rest of the session.
+
+`ctime` is creation time, so a new note copied in with a preserved, older `mtime` is caught. An existing unindexed note overwritten in place with an older `mtime` is not, until it changes again or **Sync now** runs. Catching that would mean storing every note's stat.
 
 ## Steps
 
@@ -41,7 +43,7 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 ### 2. Register vault events after layout ready (after 1)
 
-- [x] Move the four `vault.on` registrations into `onLayoutReady`
+- [x] Move the four `vault.on` registrations into `onLayoutReady` (revised in step 7: `onload`, with `create` gated on layout ready)
 - [x] Persist the save time and scan newer notes on the first index check
 - [ ] Check: unit tests cover a note created while closed; startup in the kb vault doesn't read every note — the unit tests pass and fail when the check is removed; the full-vault read at startup isn't measured in Obsidian, only reasoned from the event registration
 
@@ -66,6 +68,15 @@ The saved time (`savedAt`) is when the last completed index check started, with 
 
 - [x] Filter `planSync`'s files per ID; `expandNestedScope` reads and parses only new paths
 - [x] Check: sync-now result unchanged; tests pass. Measured 2026-11-18: planning 100 IDs over 300 notes (one source and two references each) took 157 ms before, 5.7 ms after
+
+### 7. Fix review findings (after 6)
+
+- [x] An in-app edit that changes the note's parse errors re-checks every ID
+- [x] Dirty-note drains go through the index check, so only a completed check advances the saved time
+- [x] A forced rescan resets the saved time until it completes; a failed read stops it advancing
+- [x] Vault events register in `onload`, with `create` ignored until layout ready
+- [x] `loadSyncState` keeps only `knownRefs` set to `true`
+- [ ] Check: regression tests for each, failing with the fix reverted
 
 ## What this breaks
 

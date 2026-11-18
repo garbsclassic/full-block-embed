@@ -30,7 +30,7 @@ export interface LoadedSyncState {
 
 const FINGERPRINT = /^v1:\d+:[0-9a-f]{32}$/;
 
-/** Plugin data can be edited by hand, so every value is checked before use. */
+/** Plugin data can be edited by hand, so each value is checked before use. */
 export function loadSyncState(raw: Partial<StoredSyncData> | null): LoadedSyncState {
 	const stored = raw ?? {};
 	const hashes = Object.fromEntries(
@@ -48,7 +48,10 @@ export function loadSyncState(raw: Partial<StoredSyncData> | null): LoadedSyncSt
 			: undefined;
 	// Without a save time, every note counts as possibly changed since the last save.
 	const savedAt = Number.isFinite(stored.savedAt) ? stored.savedAt! : 0;
-	return { hashes, knownRefs: { ...(stored.knownRefs ?? {}) }, files, savedAt };
+	const knownRefs = Object.fromEntries(
+		Object.entries(stored.knownRefs ?? {}).filter(([, value]) => value === true),
+	);
+	return { hashes, knownRefs, files, savedAt };
 }
 
 export function createStoredSyncData(

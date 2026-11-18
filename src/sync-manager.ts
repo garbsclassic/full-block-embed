@@ -30,6 +30,8 @@ interface Observation {
 	ids: Set<string>;
 	/** Normalized block bodies by change key, to diff against the next observation. */
 	bodies: Map<string, string>;
+	/** The note's parse errors, joined, to tell whether an edit changed them. */
+	errors: string;
 	document?: LiveDocument;
 	revision: number;
 }
@@ -83,6 +85,9 @@ export class BlockSyncManager {
 	private observationRevision = 0;
 	/** The loaded save time, until the first index check has looked for newer unindexed notes. */
 	private changedSince: number | null = null;
+	// shortcut: one failed read keeps the saved time for the rest of the session, so the next
+	// launch re-reads more notes than needed; tracking failed paths would narrow it.
+	private scanFailed = false;
 
 	constructor(
 		private plugin: Plugin,
@@ -136,11 +141,13 @@ export class BlockSyncManager {
 			return;
 		}
 		const bodies = blockBodiesByKey(path, parsed.blocks);
+		const errors = parsed.errors.join('\n');
 		let requested: Set<string>;
-		if (editedInObsidian && previous?.path === path) {
-			// An in-app edit re-checks only what it touched: a changed or new body, a block that
-			// disappeared (which also covers a marker broken mid-edit), or a marker ID that came or
-			// went. Outside changes to other blocks arrive through vault events instead.
+		if (editedInObsidian && previous?.path === path && previous.errors === errors) {
+			// An in-app edit re-checks only what it touched: a changed, new, or vanished body, or a
+			// marker ID that came or went. An edit that changes the parse errors re-checks every
+			// block, since a stray marker outside all blocks changes neither. Outside changes to
+			// other blocks arrive through vault events instead.
 			const changed = changedBlockKeys(previous.bodies, bodies);
 			for (const key of changed) this.localChanges.add(key);
 			requested = new Set([
@@ -153,6 +160,7 @@ export class BlockSyncManager {
 			path,
 			ids,
 			bodies,
+			errors,
 			document,
 			revision: ++this.observationRevision,
 		});
@@ -583,21 +591,16 @@ export class BlockSyncManager {
 	}
 
 	private async drainDirtyPaths(): Promise<void> {
-		const startedAt = Date.now();
 		const paths = [...this.dirtyPaths];
-		for (const path of paths) this.dirtyPaths.delete(path);
+		const before = paths.map((path) => this.files.get(path)?.ids ?? new Set<string>());
+		// The index check scans dirty notes, so a drain never races a check in progress and only
+		// a completed check advances the saved time.
+		await this.ensureIndex();
 		const affected = new Set<string>();
-		for (const path of paths) {
-			const before = this.files.get(path)?.ids ?? new Set<string>();
-			const file = this.plugin.app.vault.getAbstractFileByPath(path);
-			if (file instanceof TFile) await this.scanFile(file);
-			else this.setIndexedPath(path);
-			const after = this.files.get(path)?.ids ?? new Set<string>();
-			for (const id of [...before, ...after])
+		paths.forEach((path, i) => {
+			for (const id of [...before[i]!, ...(this.files.get(path)?.ids ?? [])])
 				if (this.activeIds.has(id)) affected.add(id);
-		}
-		this.markValidated(startedAt);
-		await this.persist();
+		});
 		if (affected.size) this.queue(affected, 0);
 		else if (this.dirtyPaths.size) this.scheduleDirtyPaths();
 	}
@@ -622,6 +625,8 @@ export class BlockSyncManager {
 
 	private async scanVault(): Promise<void> {
 		const startedAt = Date.now();
+		// A save before the scan completes holds a partial index, so it must not vouch for any note.
+		this.indexedThrough = 0;
 		const previousPaths = [...this.files.keys()];
 		const previousIds = [...this.pathsById.keys()];
 		this.files.clear();
@@ -647,7 +652,9 @@ export class BlockSyncManager {
 		for (const path of dirty) this.dirtyPaths.delete(path);
 		const since = this.changedSince;
 		this.changedSince = null;
-		// ctime catches a note copied in with an older, preserved mtime.
+		// ctime is creation time: it catches a note copied in with an older, preserved mtime.
+		// shortcut: an existing unindexed note overwritten in place with an older mtime is missed
+		// until it changes again or Sync now runs; catching it means storing every note's stat.
 		if (since !== null)
 			for (const file of this.plugin.app.vault.getMarkdownFiles())
 				if (
@@ -686,6 +693,7 @@ export class BlockSyncManager {
 			const text = live?.read() ?? (await this.plugin.app.vault.read(file));
 			this.indexText(file.path, text, file.stat.mtime, file.stat.size);
 		} catch (error) {
+			this.scanFailed = true;
 			console.error(
 				`Full Block Embed: unable to scan ${file.path}`,
 				error,
@@ -801,7 +809,7 @@ export class BlockSyncManager {
 	 */
 	private markValidated(startedAt: number): void {
 		this.indexValidated = this.dirtyPaths.size === 0 && this.changedSince === null;
-		if (this.indexValidated) this.indexedThrough = startedAt;
+		if (this.indexValidated && !this.scanFailed) this.indexedThrough = startedAt;
 	}
 }
 

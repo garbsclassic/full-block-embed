@@ -50,9 +50,32 @@ export default class FullBlockEmbed extends Plugin {
 		this.sourceEditor = new SourceEditor(this.app, (id) =>
 			this.sync.findSource(id),
 		);
+		const changed = (file: unknown) => {
+			if (file instanceof TFile && file.extension === 'md') {
+				this.sync.markModified(file);
+				void this.refreshReadingView(file.path);
+			}
+		};
+		this.registerEvent(this.app.vault.on('modify', changed));
 		// Vault loading emits `create` for every note, which would mark the whole vault dirty.
 		// Changes made while Obsidian was closed are found by the index's first check instead.
-		this.app.workspace.onLayoutReady(() => this.registerVaultEvents());
+		this.registerEvent(
+			this.app.vault.on('create', (file) => {
+				if (this.app.workspace.layoutReady) changed(file);
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				if (file instanceof TFile && file.extension === 'md')
+					this.sync.markDeleted(file);
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (file instanceof TFile && file.extension === 'md')
+					this.sync.markRenamed(file, oldPath);
+			}),
+		);
 		const editingActions: EditingActions = {
 			openSource: (id) => void this.sourceEditor.open(id),
 			decoupleReference: (view, block) =>
@@ -215,29 +238,6 @@ export default class FullBlockEmbed extends Plugin {
 		this.pendingReadingFiles.clear();
 		this.sync.unload();
 		this.readingView = null;
-	}
-
-	private registerVaultEvents(): void {
-		const changed = (file: unknown) => {
-			if (file instanceof TFile && file.extension === 'md') {
-				this.sync.markModified(file);
-				void this.refreshReadingView(file.path);
-			}
-		};
-		this.registerEvent(this.app.vault.on('modify', changed));
-		this.registerEvent(this.app.vault.on('create', changed));
-		this.registerEvent(
-			this.app.vault.on('delete', (file) => {
-				if (file instanceof TFile && file.extension === 'md')
-					this.sync.markDeleted(file);
-			}),
-		);
-		this.registerEvent(
-			this.app.vault.on('rename', (file, oldPath) => {
-				if (file instanceof TFile && file.extension === 'md')
-					this.sync.markRenamed(file, oldPath);
-			}),
-		);
 	}
 
 	private refreshReadingViews(
