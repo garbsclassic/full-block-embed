@@ -1295,3 +1295,75 @@ clockTest('a failed read stops the save time advancing and the note is found aft
 
 	assert.deepEqual(await pathsAfterRestart(t, savedData[1]), ['S.md', 'U.md']);
 });
+
+const X_COPY = '<!--#x=-->\nx\n<!--#x/-->\n';
+const X_BROKEN_COPY_ERROR = 'B.md:1: unclosed reference block x (closing marker is missing)';
+
+clockTest('a read that drains a dirty note still re-checks that note for open blocks', async (t) => {
+	const { manager, vault, issues, visible } = await observeInitially(
+		t,
+		{ 'A.md': X_SOURCE, 'B.md': X_COPY },
+		'A.md',
+	);
+
+	// An outside edit breaks B's copy; the read's index refresh consumes the dirty mark first.
+	vault.write('B.md', '<!--#x=-->\nx\n');
+	manager.markModified(eventFile('B.md'));
+	let read = false;
+	const files = manager.filesForId('x').then((result) => {
+		read = true;
+		return result;
+	});
+	// Tick only the zero-delay index yields, so the 500 ms debounce has not fired yet.
+	for (let round = 0; round < 50 && !read; round++) {
+		t.mock.timers.tick(0);
+		await flushEventLoop();
+	}
+	assert.equal(read, true);
+	assert.deepEqual((await files).map((file) => file.path), ['A.md', 'B.md']);
+
+	await runUntil(t, () => issues.length === 1);
+	assert.deepEqual(visible.list, [X_BROKEN_COPY_ERROR]);
+});
+
+clockTest('synchronizeAll during the first index check still rescans every note', async (t) => {
+	const vault = closedWhileEditedVault();
+	const release = vault.holdRead('U.md');
+	const { manager } = createManager({ vault });
+	manager.load(closedWhileEditedState());
+
+	const check = manager.filesForId('u');
+	await flushEventLoop();
+	const full = manager.synchronizeAll();
+	// No event reports this edit, so only a forced rescan can see the new block in N.md.
+	vault.write('N.md', `${N_SOURCE}<!--#m+-->\nm\n<!--#m/-->\n`);
+	release();
+	await settleOnClock(t, check);
+	await settleOnClock(t, full);
+
+	const files = await settleOnClock(t, manager.filesForId('m'));
+	assert.deepEqual(files.map((file) => file.path), ['N.md']);
+});
+
+clockTest('a read waits for a running pass and returns the text it wrote', async (t) => {
+	const owner = {};
+	const vault = createVault({ 'A.md': UNSYNCED_A }, { holdProcess: true });
+	const { manager } = createManager({ vault });
+	manager.observe(owner, 'A.md', UNSYNCED_A);
+	await runUntil(t, () => vault.heldProcesses.length === 1);
+
+	let settled = false;
+	const files = manager.filesForId('foo').then((result) => {
+		settled = true;
+		return result;
+	});
+	t.mock.timers.runAll();
+	await flushEventLoop();
+	assert.equal(settled, false);
+
+	vault.completeProcess();
+	await runUntil(t, () => settled);
+
+	const synced = '<!--#foo+-->\nnew\n<!--#foo/-->\n<!--#foo=-->\nnew\n<!--#foo/-->\n';
+	assert.deepEqual(await files, [{ path: 'A.md', text: synced }]);
+});

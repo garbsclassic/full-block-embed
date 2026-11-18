@@ -39,8 +39,8 @@ Out:
 
 ### 2. Test the loop (after 1)
 
-- [ ] Regression tests for the decisions above: a read that drains dirty notes still re-checks their open blocks, a full pass requested during an index check still rescans, readers wait for a running pass
-- [ ] Check: each new test fails against `refactor/sync-performance`
+- [x] Regression tests for the decisions above: a read that drains dirty notes still re-checks their open blocks, a full pass requested during an index check still rescans, readers wait for a running pass
+- [x] Check: each new test fails against `refactor/sync-performance` (101 tests; the three new ones fail there). A `ConcurrentEditError` retry test passed on both, so it wasn't kept
 
 ## What this breaks
 
