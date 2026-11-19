@@ -72,16 +72,16 @@ export class BlockSyncManager {
 	private localChanges = new Set<string>();
 	private indexReady = false;
 	private indexValidated = false;
-	private indexPromise: Promise<void> | null = null;
-	private syncTimer: number | null = null;
-	private dirtyTimer: number | null = null;
+	/** Pending debounce; queued IDs are due once it fires. */
+	private timer: number | null = null;
+	/** The running work loop, which every caller waits on. */
+	private working: Promise<void> | null = null;
+	/** `synchronizeAll` asked for a rescan and a pass over every indexed ID. */
+	private fullPass = false;
 	private unsaved = true;
 	/** Notes changed before this time are in the index; saved as `savedAt`. */
 	private indexedThrough = 0;
 	private saveQueue: Promise<void> = Promise.resolve();
-	private running = false;
-	private passDone: Promise<void> = Promise.resolve();
-	private rerun = false;
 	private observationRevision = 0;
 	/** The loaded save time, until the first index check has looked for newer unindexed notes. */
 	private changedSince: number | null = null;
@@ -118,10 +118,7 @@ export class BlockSyncManager {
 	}
 
 	unload(): void {
-		if (this.syncTimer !== null) window.clearTimeout(this.syncTimer);
-		if (this.dirtyTimer !== null) window.clearTimeout(this.dirtyTimer);
-		this.syncTimer = null;
-		this.dirtyTimer = null;
+		this.cancelTimer();
 		this.observations.clear();
 		this.activeIds.clear();
 	}
@@ -181,10 +178,7 @@ export class BlockSyncManager {
 		this.rebuildActiveIds();
 		for (const id of this.queuedIds)
 			if (!this.activeIds.has(id)) this.queuedIds.delete(id);
-		if (!this.queuedIds.size && this.syncTimer !== null) {
-			window.clearTimeout(this.syncTimer);
-			this.syncTimer = null;
-		}
+		if (!this.activeIds.size) this.cancelTimer();
 		if (observation.path !== markersRemovedFrom) return;
 		// Copies shown elsewhere may have lost their source, so re-check them as an edit would.
 		const affected = intersection(observation.ids, this.activeIds);
@@ -195,10 +189,12 @@ export class BlockSyncManager {
 		// Without a stored index, the eventual first scan includes this change. Once an index
 		// exists, events let an unindexed note gain its first block without retaining every
 		// empty note in plugin data.
-		if (!this.indexReady && !this.indexPromise) return;
+		if (!this.indexReady && !this.working) return;
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		if (this.activeIds.size) this.scheduleDirtyPaths();
+		// A pending timer already brings the index up to date, and resetting it would let a stream
+		// of outside edits hold back every queued pass.
+		if (this.activeIds.size && this.timer === null) this.schedule(SYNC_DELAY);
 	}
 
 	markDeleted(file: TFile): void {
@@ -220,20 +216,17 @@ export class BlockSyncManager {
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		if (this.activeIds.size) this.scheduleDirtyPaths();
-		const affected = intersection(previous, this.activeIds);
-		if (affected.size) this.queue(affected, SYNC_DELAY);
+		if (this.activeIds.size) this.queue(intersection(previous, this.activeIds), SYNC_DELAY);
 	}
 
 	/** Runs a full pass now, after any pass already running, rather than deferring it. */
 	async synchronizeAll(): Promise<void> {
-		await this.ensureIndex(true);
-		while (this.running) await this.passDone;
-		await this.synchronize(new Set(this.pathsById.keys()));
+		this.fullPass = true;
+		await this.settle();
 	}
 
 	async getSources(): Promise<Block[]> {
-		await this.ensureIndex();
+		await this.settle();
 		const sources: Block[] = [];
 		for (const [id, paths] of this.sourcePathsById)
 			for (const path of paths) {
@@ -246,14 +239,14 @@ export class BlockSyncManager {
 	async findSource(
 		id: string,
 	): Promise<{ block: Block; file: TFile } | null> {
-		await this.ensureIndex();
+		await this.settle();
 		const paths = this.sourcePathsById.get(id);
 		if (!paths || paths.size !== 1) return null;
 		return this.readSource([...paths][0]!, id);
 	}
 
 	async filesForId(id: string): Promise<FileText[]> {
-		await this.ensureIndex();
+		await this.settle();
 		return this.readFiles(this.pathsById.get(id) ?? new Set());
 	}
 
@@ -302,34 +295,51 @@ export class BlockSyncManager {
 
 	private queue(ids: Iterable<string>, delay: number): void {
 		for (const id of ids) this.queuedIds.add(id);
-		if (this.syncTimer !== null) window.clearTimeout(this.syncTimer);
-		this.syncTimer = window.setTimeout(() => {
-			this.syncTimer = null;
-			void this.drainQueue();
+		this.schedule(delay);
+	}
+
+	private schedule(delay: number): void {
+		this.cancelTimer();
+		this.timer = window.setTimeout(() => {
+			this.timer = null;
+			void this.settle();
 		}, delay);
 	}
 
-	private async drainQueue(): Promise<void> {
-		if (this.running) {
-			this.rerun = true;
-			return;
+	private cancelTimer(): void {
+		if (this.timer !== null) window.clearTimeout(this.timer);
+		this.timer = null;
+	}
+
+	/** Starts the work loop unless it is running, and resolves when it runs out of due work. */
+	private settle(): Promise<void> {
+		return (this.working ??= this.work());
+	}
+
+	private async work(): Promise<void> {
+		// The first step always awaits, so `working` is set before the finally clears it.
+		try {
+			do {
+				const full = this.fullPass;
+				this.fullPass = false;
+				await this.updateIndex(full);
+				// Queued IDs wait out the debounce; a full pass takes them with every indexed ID.
+				if (!full && this.timer !== null) continue;
+				const ids = new Set([...this.queuedIds, ...(full ? this.pathsById.keys() : [])]);
+				this.queuedIds.clear();
+				if (ids.size || full) await this.synchronize(ids);
+			} while (
+				this.fullPass ||
+				!this.indexReady ||
+				!this.indexValidated ||
+				(this.timer === null && this.queuedIds.size > 0)
+			);
+		} finally {
+			this.working = null;
 		}
-		const ids = new Set(this.queuedIds);
-		this.queuedIds.clear();
-		if (!ids.size) return;
-		await this.ensureIndex();
-		await this.synchronize(ids);
 	}
 
 	private async synchronize(ids: Set<string>): Promise<void> {
-		if (this.running) {
-			for (const id of ids) this.queuedIds.add(id);
-			this.rerun = true;
-			return;
-		}
-		this.running = true;
-		let finishPass!: () => void;
-		this.passDone = new Promise((resolve) => (finishPass = resolve));
 		try {
 			const scope = await this.expandNestedScope(ids);
 			ids = scope.ids;
@@ -428,8 +438,7 @@ export class BlockSyncManager {
 				// The vault changed between the read and guarded write. Rebuild the
 				// plan from the new contents instead of surfacing a transient error
 				// and leaving the copies permanently unsynchronized.
-				for (const id of ids) this.queuedIds.add(id);
-				this.rerun = true;
+				this.queue(ids, SYNC_DELAY);
 				return;
 			}
 			console.error(
@@ -442,13 +451,6 @@ export class BlockSyncManager {
 					[INTERRUPTED_ISSUE_KEY, [`Synchronization interrupted: ${String(error)}`]],
 				]),
 			);
-		} finally {
-			this.running = false;
-			finishPass();
-			if (this.rerun || this.queuedIds.size) {
-				this.rerun = false;
-				this.queue([], SYNC_DELAY);
-			}
 		}
 	}
 
@@ -582,45 +584,12 @@ export class BlockSyncManager {
 		return block ? { block, file } : null;
 	}
 
-	private scheduleDirtyPaths(): void {
-		if (this.dirtyTimer !== null) window.clearTimeout(this.dirtyTimer);
-		this.dirtyTimer = window.setTimeout(() => {
-			this.dirtyTimer = null;
-			void this.drainDirtyPaths();
-		}, SYNC_DELAY);
-	}
-
-	private async drainDirtyPaths(): Promise<void> {
-		const paths = [...this.dirtyPaths];
-		const before = paths.map((path) => this.files.get(path)?.ids ?? new Set<string>());
-		// The index check scans dirty notes, so a drain never races a check in progress and only
-		// a completed check advances the saved time.
-		await this.ensureIndex();
-		const affected = new Set<string>();
-		paths.forEach((path, i) => {
-			for (const id of [...before[i]!, ...(this.files.get(path)?.ids ?? [])])
-				if (this.activeIds.has(id)) affected.add(id);
-		});
-		if (affected.size) this.queue(affected, 0);
-		else if (this.dirtyPaths.size) this.scheduleDirtyPaths();
-	}
-
-	private async ensureIndex(force = false): Promise<void> {
-		if (this.indexPromise) return this.indexPromise;
+	// Only the loop calls this, so dirty notes are never scanned twice at once.
+	private async updateIndex(force: boolean): Promise<void> {
 		if (this.indexReady && this.indexValidated && !force) return;
-		this.indexPromise = this.prepareIndex(force);
-		try {
-			await this.indexPromise;
-			await this.persist();
-		} finally {
-			this.indexPromise = null;
-		}
-	}
-
-	private async prepareIndex(force: boolean): Promise<void> {
 		if (force || !this.indexReady) await this.scanVault();
-		else await this.refreshChangedFiles();
 		while (!this.indexValidated) await this.refreshChangedFiles();
+		await this.persist();
 	}
 
 	private async scanVault(): Promise<void> {
@@ -650,6 +619,13 @@ export class BlockSyncManager {
 		const startedAt = Date.now();
 		const dirty = new Set(this.dirtyPaths);
 		for (const path of dirty) this.dirtyPaths.delete(path);
+		// An outside edit re-checks the open blocks a dirty note held before or after its rescan.
+		const queueOpen = (): void => {
+			for (const path of dirty)
+				for (const id of this.files.get(path)?.ids ?? [])
+					if (this.activeIds.has(id)) this.queuedIds.add(id);
+		};
+		queueOpen();
 		const since = this.changedSince;
 		this.changedSince = null;
 		// ctime is creation time: it catches a note copied in with an older, preserved mtime.
@@ -683,6 +659,7 @@ export class BlockSyncManager {
 				await this.scanFile(file);
 			await yieldToUi();
 		}
+		queueOpen();
 		this.indexReady = true;
 		this.markValidated(startedAt);
 	}
