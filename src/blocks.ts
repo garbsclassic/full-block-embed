@@ -321,14 +321,6 @@ export function contentFingerprint(body: string): string {
 		.join('')}`;
 }
 
-/** Accept the former full-content baseline while data migrates to hashes. */
-function storedFingerprint(value: string | undefined): string | undefined {
-	if (value === undefined) return undefined;
-	return /^v1:\d+:[0-9a-f]{32}$/.test(value)
-		? value
-		: contentFingerprint(normalize(value));
-}
-
 export function planSync(
 	files: FileText[],
 	previous: Record<string, string>,
@@ -458,7 +450,7 @@ export function planSync(
 				continue;
 			}
 		}
-		const base = storedFingerprint(previous[id]);
+		const base = previous[id];
 		const candidates = new Map<string, string>();
 		const approvedFingerprints = new Set<string>();
 		const outsideChanges: Array<{

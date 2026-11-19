@@ -12,16 +12,12 @@ import {
 } from './blocks';
 import { nestedSyncOrder, rebaseContainingFingerprints } from './nesting';
 import { blockIssueKey, INTERRUPTED_ISSUE_KEY } from './sync-issues';
-import {
-	createStoredSyncData,
-	LegacyStoredSyncData,
-	loadSyncState,
-} from './sync-state';
+import { createStoredSyncData, loadSyncState, StoredSyncData } from './sync-state';
 
-export type { LegacyStoredSyncData } from './sync-state';
+export type { StoredSyncData } from './sync-state';
 
 const INDEX_CHUNK_SIZE = 50;
-const SYNC_DELAY = 100;
+const SYNC_DELAY = 500;
 const MARKER_ID = /<!--#\/?([^\s>]+?)(?=[+=/]|-->|\s)/g;
 
 export interface LiveDocument {
@@ -32,7 +28,10 @@ export interface LiveDocument {
 interface Observation {
 	path: string;
 	ids: Set<string>;
-	text: string;
+	/** Normalized block bodies by change key, to diff against the next observation. */
+	bodies: Map<string, string>;
+	/** The note's parse errors, joined, to tell whether an edit changed them. */
+	errors: string;
 	document?: LiveDocument;
 	revision: number;
 }
@@ -63,7 +62,6 @@ class ConcurrentEditError extends Error {}
 export class BlockSyncManager {
 	private hashes: Record<string, string> = {};
 	private knownRefs: Record<string, boolean> = {};
-	private savedSourcePaths: Record<string, string> = {};
 	private observations = new Map<object, Observation>();
 	private activeIds = new Set<string>();
 	private files = new Map<string, IndexedFile>();
@@ -77,23 +75,29 @@ export class BlockSyncManager {
 	private indexPromise: Promise<void> | null = null;
 	private syncTimer: number | null = null;
 	private dirtyTimer: number | null = null;
-	private lastSaved = '';
+	private unsaved = true;
+	/** Notes changed before this time are in the index; saved as `savedAt`. */
+	private indexedThrough = 0;
 	private saveQueue: Promise<void> = Promise.resolve();
 	private running = false;
 	private passDone: Promise<void> = Promise.resolve();
 	private rerun = false;
 	private observationRevision = 0;
+	/** The loaded save time, until the first index check has looked for newer unindexed notes. */
+	private changedSince: number | null = null;
+	// shortcut: one failed read keeps the saved time for the rest of the session, so the next
+	// launch re-reads more notes than needed; tracking failed paths would narrow it.
+	private scanFailed = false;
 
 	constructor(
 		private plugin: Plugin,
 		private callbacks: SyncManagerCallbacks,
 	) {}
 
-	load(raw: LegacyStoredSyncData | null): void {
+	load(raw: Partial<StoredSyncData> | null): void {
 		const stored = loadSyncState(raw);
 		this.hashes = stored.hashes;
 		this.knownRefs = stored.knownRefs;
-		this.savedSourcePaths = stored.sourcePaths;
 
 		if (!stored.files) return;
 		for (const [path, entry] of Object.entries(stored.files))
@@ -105,9 +109,12 @@ export class BlockSyncManager {
 					sourceIds: new Set(entry.sourceIds),
 				});
 		this.indexReady = true;
-		// Stat indexed block notes when a shared block is first displayed. This
-		// finds outside changes without retaining or reading every vault note.
+		// Stat notes when a shared block is first displayed: indexed notes whose stat changed and
+		// unindexed notes newer than the last save. This finds changes made while Obsidian was
+		// closed without retaining or reading every vault note.
 		this.indexValidated = false;
+		this.changedSince = stored.savedAt;
+		this.indexedThrough = stored.savedAt;
 	}
 
 	unload(): void {
@@ -133,19 +140,32 @@ export class BlockSyncManager {
 			this.unobserve(owner, path);
 			return;
 		}
-		if (editedInObsidian && previous?.path === path)
-			for (const key of changedBlockKeys(path, previous.text, text))
-				this.localChanges.add(key);
+		const bodies = blockBodiesByKey(path, parsed.blocks);
+		const errors = parsed.errors.join('\n');
+		let requested: Set<string>;
+		if (editedInObsidian && previous?.path === path && previous.errors === errors) {
+			// An in-app edit re-checks only what it touched: a changed, new, or vanished body, or a
+			// marker ID that came or went. An edit that changes the parse errors re-checks every
+			// block, since a stray marker outside all blocks changes neither. Outside changes to
+			// other blocks arrive through vault events instead.
+			const changed = changedBlockKeys(previous.bodies, bodies);
+			for (const key of changed) this.localChanges.add(key);
+			requested = new Set([
+				...[...changed, ...changedBlockKeys(bodies, previous.bodies)].map(changeKeyId),
+				...[...ids].filter((id) => !previous.ids.has(id)),
+				...[...previous.ids].filter((id) => !ids.has(id)),
+			]);
+		} else requested = new Set([...ids, ...(previous?.ids ?? [])]);
 		this.observations.set(owner, {
 			path,
 			ids,
-			text,
+			bodies,
+			errors,
 			document,
 			revision: ++this.observationRevision,
 		});
 		this.indexParsed(path, text, parsed.blocks);
 		this.rebuildActiveIds();
-		const requested = new Set([...ids, ...(previous?.ids ?? [])]);
 		if (requested.size) this.queue(requested, previous ? SYNC_DELAY : 0);
 	}
 
@@ -172,9 +192,9 @@ export class BlockSyncManager {
 	}
 
 	markModified(file: TFile): void {
-		// A legacy cache has no structural index yet; its eventual first scan will
-		// include this change. Once an index exists, events let an unindexed note
-		// gain its first block without retaining every empty note in plugin data.
+		// Without a stored index, the eventual first scan includes this change. Once an index
+		// exists, events let an unindexed note gain its first block without retaining every
+		// empty note in plugin data.
 		if (!this.indexReady && !this.indexPromise) return;
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
@@ -200,8 +220,6 @@ export class BlockSyncManager {
 		this.dirtyPaths.delete(oldPath);
 		this.dirtyPaths.add(file.path);
 		this.indexValidated = false;
-		for (const [id, path] of Object.entries(this.savedSourcePaths))
-			if (path === oldPath) this.savedSourcePaths[id] = file.path;
 		if (this.activeIds.size) this.scheduleDirtyPaths();
 		const affected = intersection(previous, this.activeIds);
 		if (affected.size) this.queue(affected, SYNC_DELAY);
@@ -231,12 +249,7 @@ export class BlockSyncManager {
 		await this.ensureIndex();
 		const paths = this.sourcePathsById.get(id);
 		if (!paths || paths.size !== 1) return null;
-		const located = await this.readSource([...paths][0]!, id);
-		if (!located) {
-			delete this.savedSourcePaths[id];
-			return null;
-		}
-		return located;
+		return this.readSource([...paths][0]!, id);
 	}
 
 	async filesForId(id: string): Promise<FileText[]> {
@@ -269,13 +282,12 @@ export class BlockSyncManager {
 	}
 
 	async forget(id: string): Promise<void> {
+		const refs = Object.entries(this.knownRefs);
+		const keptRefs = refs.filter(([key]) => changeKeyId(key) !== id);
+		const hadHash = Object.prototype.hasOwnProperty.call(this.hashes, id);
+		if (hadHash || keptRefs.length !== refs.length) this.unsaved = true;
 		delete this.hashes[id];
-		delete this.savedSourcePaths[id];
-		this.knownRefs = Object.fromEntries(
-			Object.entries(this.knownRefs).filter(
-				([key]) => key.split('\u0000')[1] !== id,
-			),
-		);
+		this.knownRefs = Object.fromEntries(keptRefs);
 		this.clearLocalChanges(new Set([id]));
 		await this.persist();
 	}
@@ -358,8 +370,10 @@ export class BlockSyncManager {
 				patchesByPath: Map<string, Patch[]>;
 			}> = [];
 			for (const id of order.ids) {
+				// Every note in scope parsed cleanly above, so each ID only needs the notes that
+				// mention it. The prefix test is a superset; planSync ignores the extra blocks.
 				const plan = planSync(
-					scanned,
+					scanned.filter((file) => file.text.includes(`<!--#${id}`)),
 					nextHashes,
 					nextRefs,
 					new Set([id]),
@@ -397,10 +411,11 @@ export class BlockSyncManager {
 			for (const stage of stages)
 				for (const [path, patches] of stage.patchesByPath)
 					await this.applyFilePatches(path, patches, stage.files);
+			if (!sameEntries(this.hashes, nextHashes) || !sameEntries(this.knownRefs, nextRefs))
+				this.unsaved = true;
 			this.hashes = nextHashes;
 			this.knownRefs = nextRefs;
 			this.clearLocalChanges(ids);
-			this.refreshSavedSourcePaths(ids);
 			const changedPaths = new Set(
 				stages.flatMap((stage) => [...stage.patchesByPath.keys()]),
 			);
@@ -442,23 +457,18 @@ export class BlockSyncManager {
 	): Promise<{ ids: Set<string>; files: FileText[]; parseErrors: Map<string, string[]> }> {
 		// An ID that left the index has no copies left, so there is nothing to synchronize.
 		const ids = new Set([...requested].filter((id) => this.pathsById.has(id)));
-		const paths = new Set<string>();
+		// Each note is read and parsed once; the guarded write catches a note changed since.
+		const scanned = new Map<string, { file: FileText; blocks: Block[]; errors: string[] }>();
 		let changed = true;
-		let files: FileText[] = [];
-		let parseErrors = new Map<string, string[]>();
 		while (changed) {
 			changed = false;
-			for (const id of ids)
-				for (const path of this.pathsById.get(id) ?? [])
-					if (!paths.has(path)) {
-						paths.add(path);
-						changed = true;
-					}
-			files = await this.readFiles(paths);
-			parseErrors = new Map();
-			for (const file of files) {
-				const { blocks, errors } = parseFile(file.path, file.text);
-				parseErrors.set(file.path, errors);
+			const unread = new Set(
+				[...ids].flatMap((id) => [...(this.pathsById.get(id) ?? [])]),
+			);
+			for (const path of scanned.keys()) unread.delete(path);
+			for (const file of await this.readFiles(unread))
+				scanned.set(file.path, { file, ...parseFile(file.path, file.text) });
+			for (const { blocks } of scanned.values())
 				for (const parent of blocks) {
 					if (!ids.has(parent.id)) continue;
 					for (const child of blocks)
@@ -471,9 +481,13 @@ export class BlockSyncManager {
 							changed = true;
 						}
 				}
-			}
 		}
-		return { ids, files, parseErrors };
+		const entries = [...scanned.values()];
+		return {
+			ids,
+			files: entries.map((entry) => entry.file),
+			parseErrors: new Map(entries.map((entry) => [entry.file.path, entry.errors])),
+		};
 	}
 
 	private async applyFilePatches(
@@ -578,20 +592,15 @@ export class BlockSyncManager {
 
 	private async drainDirtyPaths(): Promise<void> {
 		const paths = [...this.dirtyPaths];
-		for (const path of paths) this.dirtyPaths.delete(path);
+		const before = paths.map((path) => this.files.get(path)?.ids ?? new Set<string>());
+		// The index check scans dirty notes, so a drain never races a check in progress and only
+		// a completed check advances the saved time.
+		await this.ensureIndex();
 		const affected = new Set<string>();
-		for (const path of paths) {
-			const before = this.files.get(path)?.ids ?? new Set<string>();
-			const file = this.plugin.app.vault.getAbstractFileByPath(path);
-			if (file instanceof TFile) await this.scanFile(file);
-			else this.setIndexedPath(path);
-			const after = this.files.get(path)?.ids ?? new Set<string>();
-			for (const id of [...before, ...after])
+		paths.forEach((path, i) => {
+			for (const id of [...before[i]!, ...(this.files.get(path)?.ids ?? [])])
 				if (this.activeIds.has(id)) affected.add(id);
-		}
-		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
-		await this.persist();
+		});
 		if (affected.size) this.queue(affected, 0);
 		else if (this.dirtyPaths.size) this.scheduleDirtyPaths();
 	}
@@ -615,12 +624,17 @@ export class BlockSyncManager {
 	}
 
 	private async scanVault(): Promise<void> {
+		const startedAt = Date.now();
+		// A save before the scan completes holds a partial index, so it must not vouch for any note.
+		this.indexedThrough = 0;
 		const previousPaths = [...this.files.keys()];
 		const previousIds = [...this.pathsById.keys()];
 		this.files.clear();
 		this.pathsById.clear();
 		this.sourcePathsById.clear();
 		this.dirtyPaths.clear();
+		this.unsaved = true;
+		this.changedSince = null;
 		const files = this.plugin.app.vault.getMarkdownFiles();
 		for (let i = 0; i < files.length; i += INDEX_CHUNK_SIZE) {
 			for (const file of files.slice(i, i + INDEX_CHUNK_SIZE))
@@ -629,13 +643,25 @@ export class BlockSyncManager {
 		}
 		this.clearIssuesLeftIndex(previousPaths, previousIds);
 		this.indexReady = true;
-		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
+		this.markValidated(startedAt);
 	}
 
 	private async refreshChangedFiles(): Promise<void> {
+		const startedAt = Date.now();
 		const dirty = new Set(this.dirtyPaths);
 		for (const path of dirty) this.dirtyPaths.delete(path);
+		const since = this.changedSince;
+		this.changedSince = null;
+		// ctime is creation time: it catches a note copied in with an older, preserved mtime.
+		// shortcut: an existing unindexed note overwritten in place with an older mtime is missed
+		// until it changes again or Sync now runs; catching it means storing every note's stat.
+		if (since !== null)
+			for (const file of this.plugin.app.vault.getMarkdownFiles())
+				if (
+					!this.files.has(file.path) &&
+					Math.max(file.stat.mtime, file.stat.ctime) > since
+				)
+					dirty.add(file.path);
 		const candidates = new Map<string, TFile>();
 		for (const path of new Set([...this.files.keys(), ...dirty])) {
 			const file = this.plugin.app.vault.getAbstractFileByPath(path);
@@ -658,8 +684,7 @@ export class BlockSyncManager {
 			await yieldToUi();
 		}
 		this.indexReady = true;
-		this.indexValidated = this.dirtyPaths.size === 0;
-		this.refreshAllSavedSourcePaths();
+		this.markValidated(startedAt);
 	}
 
 	private async scanFile(file: TFile): Promise<void> {
@@ -668,6 +693,7 @@ export class BlockSyncManager {
 			const text = live?.read() ?? (await this.plugin.app.vault.read(file));
 			this.indexText(file.path, text, file.stat.mtime, file.stat.size);
 		} catch (error) {
+			this.scanFailed = true;
 			console.error(
 				`Full Block Embed: unable to scan ${file.path}`,
 				error,
@@ -709,8 +735,11 @@ export class BlockSyncManager {
 
 	/** Replaces a path's index entry; with no IDs to index, the path leaves the index. */
 	private setIndexedPath(path: string, indexed?: IndexedFile): void {
-		const previousIds = [...(this.files.get(path)?.ids ?? [])];
-		const wasIndexed = this.files.has(path);
+		const previous = this.files.get(path);
+		// Typing re-indexes the note on every keystroke; an unchanged entry needs no rewrite.
+		if (previous && indexed && sameIndexEntry(previous, indexed)) return;
+		const previousIds = [...(previous?.ids ?? [])];
+		const wasIndexed = previous !== undefined;
 		this.removeIndexedPath(path);
 		if (indexed?.ids.size) this.addIndexedPath(path, indexed);
 		if (wasIndexed) this.clearIssuesLeftIndex([path], previousIds);
@@ -726,6 +755,7 @@ export class BlockSyncManager {
 	}
 
 	private addIndexedPath(path: string, indexed: IndexedFile): void {
+		this.unsaved = true;
 		this.files.set(path, indexed);
 		for (const id of indexed.ids) addPath(this.pathsById, id, path);
 		for (const id of indexed.sourceIds)
@@ -735,36 +765,21 @@ export class BlockSyncManager {
 	private removeIndexedPath(path: string): void {
 		const previous = this.files.get(path);
 		if (!previous) return;
+		this.unsaved = true;
 		for (const id of previous.ids) removePath(this.pathsById, id, path);
 		for (const id of previous.sourceIds)
 			removePath(this.sourcePathsById, id, path);
 		this.files.delete(path);
 	}
 
-	private refreshSavedSourcePaths(ids: Iterable<string>): void {
-		for (const id of ids) {
-			const paths = this.sourcePathsById.get(id);
-			if (paths?.size === 1) this.savedSourcePaths[id] = [...paths][0]!;
-			else delete this.savedSourcePaths[id];
-		}
-	}
-
-	private refreshAllSavedSourcePaths(): void {
-		this.refreshSavedSourcePaths(
-			new Set([
-				...this.sourcePathsById.keys(),
-				...Object.keys(this.savedSourcePaths),
-			]),
-		);
-	}
 
 	private clearLocalChanges(ids: ReadonlySet<string>): void {
 		for (const key of this.localChanges)
-			if (ids.has(key.split('\u0000')[1] ?? ''))
+			if (ids.has(changeKeyId(key)))
 				this.localChanges.delete(key);
 	}
 
-	// One save runs at a time, so lastSaved always matches the newest save requested.
+	// One save runs at a time, so a change made during a save is written by the next one.
 	private persist(): Promise<void> {
 		const run = this.saveQueue.then(() => this.save());
 		this.saveQueue = run.catch(() => undefined);
@@ -772,17 +787,48 @@ export class BlockSyncManager {
 	}
 
 	private async save(): Promise<void> {
+		if (!this.unsaved) return;
 		const data = createStoredSyncData(
 			this.hashes,
 			this.knownRefs,
-			this.savedSourcePaths,
 			this.files,
+			this.indexedThrough,
 		);
-		const serialized = JSON.stringify(data);
-		if (serialized === this.lastSaved) return;
-		await this.plugin.saveData(data);
-		this.lastSaved = serialized;
+		this.unsaved = false;
+		try {
+			await this.plugin.saveData(data);
+		} catch (error) {
+			this.unsaved = true;
+			throw error;
+		}
 	}
+
+	/**
+	 * Records that notes changed before `startedAt` are indexed, once nothing is left to check.
+	 * The time is saved but doesn't mark the data unsaved: a stale time only rescans more notes.
+	 */
+	private markValidated(startedAt: number): void {
+		this.indexValidated = this.dirtyPaths.size === 0 && this.changedSince === null;
+		if (this.indexValidated && !this.scanFailed) this.indexedThrough = startedAt;
+	}
+}
+
+function sameIndexEntry(a: IndexedFile, b: IndexedFile): boolean {
+	return (
+		a.mtime === b.mtime &&
+		a.size === b.size &&
+		sameSet(a.ids, b.ids) &&
+		sameSet(a.sourceIds, b.sourceIds)
+	);
+}
+
+function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	return a.size === b.size && [...a].every((value) => b.has(value));
+}
+
+function sameEntries<T>(a: Record<string, T>, b: Record<string, T>): boolean {
+	const keys = Object.keys(a);
+	return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
 }
 
 function groupPatchesByPath(patches: Patch[]): Map<string, Patch[]> {
@@ -827,24 +873,23 @@ function markerIds(text: string, blocks: Block[]): Set<string> {
 	return ids;
 }
 
+/** Keys of blocks whose body differs from, or is missing in, `previous`. */
 function changedBlockKeys(
-	path: string,
-	previousText: string,
-	currentText: string,
-): Set<string> {
-	const previous = blockBodiesByKey(path, previousText);
-	const current = blockBodiesByKey(path, currentText);
-	return new Set(
-		[...current].flatMap(([key, body]) =>
-			previous.get(key) === body ? [] : [key],
-		),
-	);
+	previous: ReadonlyMap<string, string>,
+	current: ReadonlyMap<string, string>,
+): string[] {
+	return [...current].flatMap(([key, body]) => (previous.get(key) === body ? [] : [key]));
 }
 
-function blockBodiesByKey(path: string, text: string): Map<string, string> {
+/** Change keys carry the block ID as their second field (see `sourceChangeKey`). */
+function changeKeyId(key: string): string {
+	return key.split('\u0000')[1] ?? '';
+}
+
+function blockBodiesByKey(path: string, blocks: Block[]): Map<string, string> {
 	const result = new Map<string, string>();
 	const ordinals = new Map<string, number>();
-	for (const block of parseFile(path, text).blocks) {
+	for (const block of blocks) {
 		if (block.kind === '+') {
 			result.set(sourceChangeKey(path, block.id), normalize(block.body));
 			continue;

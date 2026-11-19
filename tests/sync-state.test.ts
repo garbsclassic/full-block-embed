@@ -14,7 +14,6 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 	const stored = createStoredSyncData(
 		{ example: hash },
 		{ 'Reference.md\u0000example\u00000': true },
-		{ example: 'Source.md' },
 		new Map([
 			[
 				'Source.md',
@@ -35,6 +34,7 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 				},
 			],
 		]),
+		1234,
 	);
 
 	assert.equal(stored.version, 3);
@@ -50,18 +50,40 @@ test('disk cache includes structural metadata and synchronization hashes', () =>
 	assert.deepEqual(loadSyncState(stored), {
 		hashes: { example: hash },
 		knownRefs: { 'Reference.md\u0000example\u00000': true },
-		sourcePaths: { example: 'Source.md' },
 		files: stored.files,
+		savedAt: 1234,
 	});
 });
 
-test('legacy full-content baselines migrate to hashes without a startup index', () => {
+test('loading drops baselines that are not fingerprints and indexes without a version', () => {
+	const hash = contentFingerprint('Kept');
 	const loaded = loadSyncState({
-		revisions: { example: 'Legacy private body' },
+		hashes: { kept: hash, raw: 'Private body', wrong: 42 as unknown as string },
+		files: {},
 	});
-	assert.equal(
-		loaded.hashes.example,
-		contentFingerprint('Legacy private body'),
-	);
+	assert.deepEqual(loaded.hashes, { kept: hash });
 	assert.equal(loaded.files, undefined);
+});
+
+test('loading defaults the save time to 0 when it is missing or not a finite number', () => {
+	const stored = { version: 3 as const, hashes: {}, knownRefs: {}, files: {} };
+
+	assert.equal(loadSyncState(stored).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: Number.NaN }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: Infinity }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: '5' as unknown as number }).savedAt, 0);
+	assert.equal(loadSyncState({ ...stored, savedAt: 42 }).savedAt, 42);
+});
+
+test('loading keeps only known references whose value is exactly true', () => {
+	const loaded = loadSyncState({
+		knownRefs: {
+			kept: true,
+			text: 'false' as unknown as boolean,
+			number: 1 as unknown as boolean,
+			off: false,
+		},
+	});
+
+	assert.deepEqual(loaded.knownRefs, { kept: true });
 });

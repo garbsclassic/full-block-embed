@@ -33,7 +33,7 @@ const updated = (
 	known = { 'Ref.md\u0000example\u00000': true },
 ) => {
 	const input = files(a, b),
-		plan = planSync(input, { example: base }, known);
+		plan = planSync(input, { example: contentFingerprint(base) }, known);
 	return {
 		plan,
 		text: input.map((f) =>
@@ -69,7 +69,7 @@ test('the same edit made in source and reference is accepted', () => {
 	assert.equal(plan.next.example, contentFingerprint('Same change'));
 });
 test('new empty reference hydrates but an existing cleared reference propagates deletion', () => {
-	const fresh = planSync(files('Original', ''), { example: 'Original' }, {});
+	const fresh = planSync(files('Original', ''), { example: contentFingerprint('Original') }, {});
 	assert.equal(fresh.patches.length, 1);
 	assert.equal(applyPatches(ref(''), fresh.patches), ref('Original'));
 	const cleared = updated('Original', '', 'Original');
@@ -220,7 +220,7 @@ test('a mismatched reference added outside Obsidian is not silently hydrated', (
 });
 test('new populated reference with stale text cannot redefine an established source', () => {
 	const input = files('Current', 'Stale');
-	const plan = planSync(input, { example: 'Current' }, {});
+	const plan = planSync(input, { example: contentFingerprint('Current') }, {});
 	assert.deepEqual(plan.errors, []);
 	assert.equal(
 		applyPatches(
@@ -557,7 +557,7 @@ test('CRLF files retain CRLF and block offsets', () => {
 	}));
 	const plan = planSync(
 		input,
-		{ example: 'Old' },
+		{ example: contentFingerprint('Old') },
 		{ 'Ref.md\u0000example\u00000': true },
 	);
 	const changed = applyPatches(input[1].text, plan.patches);
@@ -571,7 +571,7 @@ test('multiple references in one file patch from the end', () => {
 	];
 	const plan = planSync(
 		input,
-		{ example: 'Old' },
+		{ example: contentFingerprint('Old') },
 		{ 'b.md\u0000example\u00000': true, 'b.md\u0000example\u00001': true },
 	);
 	assert.equal(plan.patches.length, 2);
@@ -584,7 +584,7 @@ test('patches reject a concurrent file edit', () => {
 	const input = files('New', 'Old');
 	const plan = planSync(
 		input,
-		{ example: 'Old' },
+		{ example: contentFingerprint('Old') },
 		{ 'Ref.md\u0000example\u00000': true },
 	);
 	assert.throws(
@@ -654,7 +654,7 @@ test('invalid compact markers pause all synchronization writes', () => {
 	]) {
 		const plan = planSync(
 			[...files('New', 'Old'), { path: 'Bad.md', text: marker }],
-			{ example: 'Old' },
+			{ example: contentFingerprint('Old') },
 		);
 		assert.ok(plan.errors.length, marker);
 		assert.deepEqual(plan.patches, [], marker);
@@ -711,7 +711,7 @@ test('targeted synchronization retains state for inactive blocks', () => {
 			{ path: 'Other-source.md', text: otherSource },
 			{ path: 'Other-ref.md', text: otherRef },
 		],
-		{ example: 'Old', other: contentFingerprint('Other') },
+		{ example: contentFingerprint('Old'), other: contentFingerprint('Other') },
 		known,
 		new Set(['example']),
 	);

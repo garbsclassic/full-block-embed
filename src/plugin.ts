@@ -20,7 +20,7 @@ import { editingExtension, type EditingActions } from './editor';
 import { ReadingViewRenderer, type ReferenceLocator } from './reading-view';
 import { SourceEditor } from './source-editor';
 import { SyncIssues } from './sync-issues';
-import { BlockSyncManager, type LegacyStoredSyncData } from './sync-manager';
+import { BlockSyncManager, type StoredSyncData } from './sync-manager';
 import { BlockPicker, ConfirmModal, IdModal } from './ui';
 
 export default class FullBlockEmbed extends Plugin {
@@ -46,7 +46,7 @@ export default class FullBlockEmbed extends Plugin {
 				this.updateIssues(() => this.issues.rename(from, to)),
 			onFilesChanged: (files) => this.refreshReadingViews(files),
 		});
-		this.sync.load((await this.loadData()) as LegacyStoredSyncData | null);
+		this.sync.load((await this.loadData()) as Partial<StoredSyncData> | null);
 		this.sourceEditor = new SourceEditor(this.app, (id) =>
 			this.sync.findSource(id),
 		);
@@ -57,7 +57,13 @@ export default class FullBlockEmbed extends Plugin {
 			}
 		};
 		this.registerEvent(this.app.vault.on('modify', changed));
-		this.registerEvent(this.app.vault.on('create', changed));
+		// Vault loading emits `create` for every note, which would mark the whole vault dirty.
+		// Changes made while Obsidian was closed are found by the index's first check instead.
+		this.registerEvent(
+			this.app.vault.on('create', (file) => {
+				if (this.app.workspace.layoutReady) changed(file);
+			}),
+		);
 		this.registerEvent(
 			this.app.vault.on('delete', (file) => {
 				if (file instanceof TFile && file.extension === 'md')
